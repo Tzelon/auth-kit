@@ -1,8 +1,6 @@
 defmodule AuthKit.Models.Identity do
   use AuthKit.Schema, prefix: "ident_"
 
-  alias AuthKit.Models.User
-
   @derive {Inspect, except: [:access_token, :refresh_token, :id_token, :password, :provider_meta]}
   schema "identities" do
     field(:identity, :string)
@@ -18,7 +16,7 @@ defmodule AuthKit.Models.Identity do
     field(:state, Ecto.Enum, values: [:active, :reauth], default: :active)
     field(:provider_meta, :map, default: %{})
 
-    belongs_to(:user, User)
+    belongs_to :user, AuthKit.Config.user_schema()
 
     timestamps()
   end

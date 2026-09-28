@@ -26,7 +26,7 @@ defmodule AuthKit.Models.UserToken do
     field(:confirmed_at, :utc_datetime_usec)
     field(:expires_at, :utc_datetime_usec)
 
-    belongs_to(:user, AuthKit.Models.User)
+    belongs_to :user, AuthKit.Config.user_schema()
 
     timestamps(type: :utc_datetime, updated_at: false)
   end
