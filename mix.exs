@@ -28,8 +28,7 @@ defmodule AuthKit.MixProject do
   defp deps do
     [
       {:plug, "~> 1.14"},
-      {:ecto, "~> 3.10"},
-      {:ecto_ksuid, "~> 0.3.0"}
+      {:ecto, "~> 3.10"}
     ]
   end
 end

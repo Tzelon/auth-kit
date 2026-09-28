@@ -1,7 +1,7 @@
 defmodule AuthKit.Test.Identity do
   @moduledoc false
 
-  use AuthKit.Schema, prefix: "ident_"
+  use AuthKit.Test.Schema
   use AuthKit.Identity
 
   schema "identities" do

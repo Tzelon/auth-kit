@@ -4,7 +4,7 @@ defmodule AuthKit.Test.User do
   configure their own with `config :auth_kit, user: MyApp.User`.
   """
 
-  use AuthKit.Schema, prefix: "usr_"
+  use AuthKit.Test.Schema
   use AuthKit.UserSchema
 
   schema "users" do
