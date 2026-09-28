@@ -77,7 +77,7 @@ defmodule AuthKit.Auth.Auth2 do
       |> strategy.callback(params)
       |> case do
         {:ok, %{user: user, token: token}} ->
-          {:ok, dbuser} = find_or_maybe_create_user(user, opts)
+          {:ok, dbuser} = find_or_maybe_create_user(params["provider"], user, opts)
 
           expires_at =
             DateTime.add(DateTime.utc_now(), token["expires_in"], :second)
@@ -120,24 +120,34 @@ defmodule AuthKit.Auth.Auth2 do
     end
   end
 
-  defp find_or_maybe_create_user(params, opts) do
+  # The provider has verified the email, which proves the user owns it. An
+  # existing account with that email gets confirmed, which also removes any
+  # password set on it before the email was proven.
+  defp find_or_maybe_create_user(provider, params, opts) do
     cond do
-      user = Auth.fetch_user_by_email(params["email"]) ->
+      user = Auth.fetch_user_by_identity(provider, params["sub"]) ->
         {:ok, user}
+
+      user = Auth.fetch_user_by_email(params["email"]) ->
+        confirm_user_email(user)
 
       not Keyword.get(opts, :auto_signup, false) ->
         {:error, :user_not_found}
 
       Keyword.get(opts, :auto_signup) ->
-        {:ok,
-         Auth.create_user(
-           %{
-             email: String.downcase(params["email"]),
-             name: params["name"],
-             avatar_url: params["picture"]
-           },
-           opts
-         )}
+        %{
+          email: String.downcase(params["email"]),
+          name: params["name"],
+          avatar_url: params["picture"]
+        }
+        |> Auth.create_user(opts)
+        |> confirm_user_email()
+    end
+  end
+
+  defp confirm_user_email(user) do
+    with {:ok, user, _expired_tokens} <- Auth.confirm_user_email(user) do
+      {:ok, user}
     end
   end
 

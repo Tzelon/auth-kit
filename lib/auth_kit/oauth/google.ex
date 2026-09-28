@@ -116,7 +116,9 @@ defmodule AuthKit.OAuth.Google do
          :ok <- check_claim(claims["iss"] in @issuers, "Invalid issuer"),
          :ok <- check_claim(claims["aud"] == config[:client_id], "Invalid audience"),
          :ok <- check_claim(not expired?(claims["exp"]), "ID token has expired"),
-         :ok <- check_claim(claims["nonce"] == (session_params[:nonce] || session_params["nonce"]), "Invalid nonce") do
+         :ok <- check_claim(claims["nonce"] == (session_params[:nonce] || session_params["nonce"]), "Invalid nonce"),
+         # Callers match accounts by email, so an unverified email must never get through.
+         :ok <- check_claim(claims["email_verified"] in [true, "true"], "Email is not verified") do
       {:ok, claims}
     end
   end

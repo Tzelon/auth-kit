@@ -161,20 +161,15 @@ defmodule AuthKit.Auth do
   1. The user has already confirmed their email. They are logged in
      and the magic link is expired.
 
-  2. The user has not confirmed their email and no password is set.
-     In this case, the user gets confirmed, logged in, and all tokens -
-     including session ones - are expired. In theory, no other tokens
-     exist but we delete all of them for best security practices.
+  2. The user has not confirmed their email. The user gets confirmed
+     with `confirm_user_email/1`, which also removes any password set
+     before the email was proven.
   """
   def verify_login_token(token) do
     with {:ok, query} <- UserToken.verify_magic_link_token_query(token) do
       case Repo.one(query) do
         {%User{confirmed_at: nil} = user, _token} ->
-          now = DateTime.utc_now() |> DateTime.truncate(:second)
-
-          user
-          |> change(confirmed_at: now)
-          |> update_user_and_delete_all_tokens()
+          confirm_user_email(user)
 
         {user, token} ->
           Repo.delete!(token)
@@ -186,6 +181,37 @@ defmodule AuthKit.Auth do
     else
       _ -> {:error, :invalid_token}
     end
+  end
+
+  @doc """
+  Confirms the user's email once they have proven they own it, through
+  a magic link or a verified email from an OAuth provider.
+
+  Password sign-up does not verify the email, so on an unconfirmed
+  account the password may have been set by someone else. Confirming
+  removes the password identity and expires all tokens, including
+  sessions. Already confirmed users are returned unchanged.
+  """
+  def confirm_user_email(%User{confirmed_at: nil} = user) do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    user
+    |> change(confirmed_at: now)
+    |> update_user_and_delete_all_tokens(delete_password: true)
+  end
+
+  def confirm_user_email(%User{} = user), do: {:ok, user, []}
+
+  @doc """
+  Gets the user linked to the given provider identity, such as a
+  Google `sub`.
+  """
+  def fetch_user_by_identity(provider, identity) do
+    Repo.one(
+      from u in User,
+        join: idn in assoc(u, :identities),
+        where: idn.provider == ^to_string(provider) and idn.identity == ^identity
+    )
   end
 
   @doc """
@@ -214,7 +240,7 @@ defmodule AuthKit.Auth do
   defp maybe_validate_unique_email(changeset, opts) do
     if Keyword.get(opts, :validate_email, true) do
       changeset
-      |> unsafe_validate_unique(:email, AuthKit.Repo)
+      |> unsafe_validate_unique(:email, AuthKit.Repo.repo())
       |> unique_constraint(:email)
     else
       changeset
@@ -247,7 +273,15 @@ defmodule AuthKit.Auth do
 
   ## Token helper
 
-  def update_user_and_delete_all_tokens(changeset) do
+  @doc """
+  Updates the user and deletes all their tokens in one transaction.
+
+  ## Options
+
+    * `:delete_password` - Also deletes the user's password identity.
+      Defaults to `false`.
+  """
+  def update_user_and_delete_all_tokens(changeset, opts \\ []) do
     %{data: %User{} = user} = changeset
 
     with {:ok, %{user: user, tokens_to_expire: expired_tokens}} <-
@@ -257,8 +291,21 @@ defmodule AuthKit.Auth do
            |> Ecto.Multi.delete_all(:tokens, fn %{tokens_to_expire: tokens_to_expire} ->
              UserToken.delete_all_query(tokens_to_expire)
            end)
+           |> maybe_delete_password(user, opts)
            |> Repo.transaction() do
       {:ok, user, expired_tokens}
+    end
+  end
+
+  defp maybe_delete_password(multi, user, opts) do
+    if Keyword.get(opts, :delete_password, false) do
+      Ecto.Multi.delete_all(
+        multi,
+        :password,
+        from(idn in Identity, where: idn.user_id == ^user.id and idn.provider == "credential")
+      )
+    else
+      multi
     end
   end
 end

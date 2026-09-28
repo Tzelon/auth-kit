@@ -154,7 +154,7 @@ defmodule AuthKit.Auth.Whatsapp do
   defp maybe_validate_unique_phone_number(changeset, opts) do
     if Keyword.get(opts, :validate_phone_number, true) do
       changeset
-      |> unsafe_validate_unique(:phone_number, AuthKit.Repo)
+      |> unsafe_validate_unique(:phone_number, AuthKit.Repo.repo())
       |> unique_constraint(:phone_number)
     else
       changeset
