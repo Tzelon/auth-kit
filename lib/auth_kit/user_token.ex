@@ -1,9 +1,20 @@
-defmodule AuthKit.Models.UserToken do
-  use AuthKit.Schema, prefix: "usrtkn_"
+defmodule AuthKit.UserToken do
+  @moduledoc """
+  Fields for your user token schema, and the token queries AuthKit runs on it.
+
+      defmodule MyApp.UserToken do
+        use Ecto.Schema
+        use AuthKit.UserToken
+
+        schema "users_tokens" do
+          auth_kit_user_token_fields()
+        end
+      end
+
+  Then set `config :auth_kit, user_token: MyApp.UserToken`.
+  """
 
   import Ecto.Query
-
-  alias AuthKit.Models.UserToken
 
   @hash_algorithm :sha256
   @rand_size 32
@@ -19,16 +30,27 @@ defmodule AuthKit.Models.UserToken do
   @code_validity_in_minutes 10
   @session_validity_in_days 60
 
-  schema "users_tokens" do
-    field(:token, :binary)
-    field(:context, :string)
-    field(:sent_to, :string)
-    field(:confirmed_at, :utc_datetime_usec)
-    field(:expires_at, :utc_datetime_usec)
+  defmacro __using__(_opts) do
+    quote do
+      import AuthKit.UserToken, only: [auth_kit_user_token_fields: 0]
+    end
+  end
 
-    belongs_to :user, AuthKit.Config.user_schema()
+  @doc """
+  Defines the user token fields, the `:user` association and timestamps.
+  """
+  defmacro auth_kit_user_token_fields do
+    quote do
+      field :token, :binary
+      field :context, :string
+      field :sent_to, :string
+      field :confirmed_at, :utc_datetime_usec
+      field :expires_at, :utc_datetime_usec
 
-    timestamps(type: :utc_datetime, updated_at: false)
+      belongs_to :user, AuthKit.Config.user_schema()
+
+      timestamps(type: :utc_datetime, updated_at: false)
+    end
   end
 
   @doc """
@@ -50,7 +72,12 @@ defmodule AuthKit.Models.UserToken do
       )
 
     {token,
-     %UserToken{token: token, context: "session", user_id: user.id, expires_at: expires_at}}
+     struct(schema(),
+       token: token,
+       context: "session",
+       user_id: user.id,
+       expires_at: expires_at
+     )}
   end
 
   @doc """
@@ -97,13 +124,13 @@ defmodule AuthKit.Models.UserToken do
       )
 
     {Base.url_encode64(token, padding: false),
-     %UserToken{
+     struct(schema(),
        token: hashed_token,
        expires_at: expires_at,
        context: context,
        sent_to: sent_to,
        user_id: user.id
-     }}
+     )}
   end
 
   def build_code(context, opts \\ []) do
@@ -136,12 +163,12 @@ defmodule AuthKit.Models.UserToken do
       )
 
     {code,
-     %UserToken{
+     struct(schema(),
        token: hashed_code,
        expires_at: expires_at,
        context: context,
        sent_to: sent_to
-     }}
+     )}
   end
 
   @doc """
@@ -204,7 +231,7 @@ defmodule AuthKit.Models.UserToken do
   """
   def check_confirmation(sent_to, context) do
     query =
-      from token in UserToken,
+      from token in schema(),
         where: [sent_to: ^sent_to, context: ^context],
         left_join: user in assoc(token, :user),
         select: {user, token}
@@ -219,24 +246,26 @@ defmodule AuthKit.Models.UserToken do
   Returns the token struct for the given token value and context.
   """
   def by_token_and_context_query(token, context) do
-    from UserToken, where: [token: ^token, context: ^context]
+    from schema(), where: [token: ^token, context: ^context]
   end
 
   @doc """
   Gets all tokens for the given user for the given contexts.
   """
   def by_user_and_contexts_query(user, :all) do
-    from t in UserToken, where: t.user_id == ^user.id
+    from t in schema(), where: t.user_id == ^user.id
   end
 
   def by_user_and_contexts_query(user, [_ | _] = contexts) do
-    from t in UserToken, where: t.user_id == ^user.id and t.context in ^contexts
+    from t in schema(), where: t.user_id == ^user.id and t.context in ^contexts
   end
 
   @doc """
   Deletes a list of tokens.
   """
   def delete_all_query(tokens) do
-    from t in UserToken, where: t.id in ^Enum.map(tokens, & &1.id)
+    from t in schema(), where: t.id in ^Enum.map(tokens, & &1.id)
   end
+
+  defp schema, do: AuthKit.Config.user_token_schema()
 end

@@ -6,7 +6,7 @@ defmodule AuthKit.Auth.Whatsapp do
   import Plug.Conn
 
   alias AuthKit.Repo
-  alias AuthKit.Models.UserToken
+  alias AuthKit.UserToken
   alias AuthKit.Auth
   alias AuthKit.Auth.Params
 
@@ -99,11 +99,11 @@ defmodule AuthKit.Auth.Whatsapp do
   defp verify_whatsapp_code(code, _opts \\ []) do
     with {:ok, query} <- UserToken.verify_code_query(code, "whatsapp") do
       case Repo.one(query) do
-        %UserToken{} = token ->
-          {:ok, token |> change(confirmed_at: DateTime.utc_now()) |> Repo.update!()}
-
         nil ->
           {:error, :code_not_found}
+
+        token ->
+          {:ok, token |> change(confirmed_at: DateTime.utc_now()) |> Repo.update!()}
       end
     else
       _ -> {:error, :invalid_code}
@@ -189,10 +189,10 @@ defmodule AuthKit.Auth.Whatsapp do
     {:ok, query} = UserToken.check_confirmation(polling_token, "whatsapp")
 
     case Repo.one(query) do
-      {_user, %UserToken{confirmed_at: nil}} ->
+      {_user, %{confirmed_at: nil}} ->
         {:error, :not_confirmed}
 
-      {nil, %UserToken{confirmed_at: _confirmed_at}} ->
+      {nil, _token} ->
         {:error, :not_found}
 
       {user, token} ->

@@ -25,8 +25,9 @@ be found at <https://hexdocs.pm/auth_kit>.
 ```elixir
 config :auth_kit,
   repo: MyApp.Repo,
-  # Your user schema (required).
-  user: MyApp.User
+  # Your schemas (required).
+  user: MyApp.User,
+  user_token: MyApp.UserToken
 ```
 
 `:user` is read at compile time. After changing it, run
@@ -47,5 +48,18 @@ schema "users" do
   field :email_confirmed_at, :utc_datetime
 
   has_many :identities, AuthKit.Models.Identity
+end
+```
+
+The user token schema gets its fields from AuthKit:
+
+```elixir
+defmodule MyApp.UserToken do
+  use Ecto.Schema
+  use AuthKit.UserToken
+
+  schema "users_tokens" do
+    auth_kit_user_token_fields()
+  end
 end
 ```

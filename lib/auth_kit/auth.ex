@@ -2,7 +2,8 @@ defmodule AuthKit.Auth do
   import Ecto.Query
   import Ecto.Changeset
 
-  alias AuthKit.Models.{Identity, UserToken}
+  alias AuthKit.Models.Identity
+  alias AuthKit.UserToken
   alias AuthKit.Repo
 
   @user AuthKit.Config.user_schema()
