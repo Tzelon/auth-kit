@@ -123,7 +123,7 @@ defmodule AuthKit.Auth.Whatsapp do
          create_user(
            %{
              phone_number: String.downcase(params["phone_number"]),
-             phone_number_verified: true,
+             phone_verified_at: DateTime.utc_now() |> DateTime.truncate(:second),
              name: params["name"]
            },
            opts
@@ -133,7 +133,7 @@ defmodule AuthKit.Auth.Whatsapp do
 
   defp create_user(params, opts) do
     struct(@user)
-    |> cast(params, [:name, :phone_number, :phone_number_verified])
+    |> cast(params, [:name, :phone_number, :phone_verified_at])
     |> validate_required([:phone_number])
     |> validate_length(:phone_number, max: 60)
     |> maybe_validate_unique_phone_number(opts)

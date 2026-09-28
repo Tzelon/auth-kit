@@ -40,7 +40,7 @@ schema "users" do
   field :name, :string
   field :avatar_url, :string
   field :phone_number, :string
-  field :phone_number_verified, :boolean
+  field :phone_verified_at, :utc_datetime
   field :email_confirmed_at, :utc_datetime
 
   has_many :identities, AuthKit.Models.Identity

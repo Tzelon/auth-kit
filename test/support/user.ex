@@ -10,7 +10,7 @@ defmodule AuthKit.Test.User do
     field :email, :string
     field :name, :string
     field :phone_number, :string
-    field :phone_number_verified, :boolean
+    field :phone_verified_at, :utc_datetime
     field :avatar_url, :string
     field :email_confirmed_at, :utc_datetime
 

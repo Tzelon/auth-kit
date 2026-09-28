@@ -42,7 +42,7 @@ defmodule AuthKit.Auth do
   """
   def create_user(attrs, opts \\ []) do
     struct(@user)
-    |> cast(attrs, [:email, :name, :avatar_url, :phone_number, :phone_number_verified])
+    |> cast(attrs, [:email, :name, :avatar_url, :phone_number, :phone_verified_at])
     |> validate_required([:email, :name])
     |> validate_email(opts)
     |> Repo.insert!()
