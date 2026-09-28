@@ -5,6 +5,7 @@ defmodule AuthKit.Test.User do
   """
 
   use AuthKit.Schema, prefix: "usr_"
+  use AuthKit.UserSchema
 
   schema "users" do
     field :email, :string
