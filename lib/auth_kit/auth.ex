@@ -2,11 +2,11 @@ defmodule AuthKit.Auth do
   import Ecto.Query
   import Ecto.Changeset
 
-  alias AuthKit.Models.Identity
   alias AuthKit.UserToken
   alias AuthKit.Repo
 
   @user AuthKit.Config.user_schema()
+  @identity AuthKit.Config.identity_schema()
 
   def fetch_user_by_email(email, opts \\ []) do
     user = Repo.one(from u in AuthKit.Config.user_schema(), where: u.email == ^email)
@@ -66,7 +66,7 @@ defmodule AuthKit.Auth do
 
   """
   def link_identity(attrs, opts \\ []) do
-    %Identity{}
+    struct(@identity)
     |> cast(attrs, [
       :user_id,
       :provider,
@@ -108,7 +108,7 @@ defmodule AuthKit.Auth do
     end
   end
 
-  defp update_identity_tokens(%Identity{} = identity, attrs) do
+  defp update_identity_tokens(identity, attrs) when is_struct(identity, @identity) do
     # We do not want to update fields to nil
     attrs = Enum.reject(attrs, fn {_, v} -> is_nil(v) end) |> Map.new()
 
@@ -129,7 +129,7 @@ defmodule AuthKit.Auth do
   @spec get_user_identity_by_provider(struct(), binary()) :: struct() | nil
   def get_user_identity_by_provider(%{id: id} = user, provider) when is_struct(user, @user) do
     Repo.one(
-      from idn in Identity,
+      from idn in AuthKit.Config.identity_schema(),
         where:
           idn.user_id == ^id and
             idn.provider == ^to_string(provider)
@@ -223,8 +223,8 @@ defmodule AuthKit.Auth do
   If there is no user or the user doesn't have a password, we call
   `AuthKit.Password.no_user_verify/0` to avoid timing attacks.
   """
-  def valid_password?(%Identity{password: hashed_password}, password)
-      when byte_size(password) > 0 do
+  def valid_password?(%{password: hashed_password} = identity, password)
+      when is_struct(identity, @identity) and byte_size(password) > 0 do
     AuthKit.Password.verify_pass(password, hashed_password)
   end
 
@@ -305,7 +305,9 @@ defmodule AuthKit.Auth do
       Ecto.Multi.delete_all(
         multi,
         :password,
-        from(idn in Identity, where: idn.user_id == ^user.id and idn.provider == "credential")
+        from(idn in AuthKit.Config.identity_schema(),
+          where: idn.user_id == ^user.id and idn.provider == "credential"
+        )
       )
     else
       multi

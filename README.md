@@ -27,6 +27,7 @@ config :auth_kit,
   repo: MyApp.Repo,
   # Your schemas (required).
   user: MyApp.User,
+  identity: MyApp.Identity,
   user_token: MyApp.UserToken
 ```
 
@@ -47,13 +48,23 @@ schema "users" do
   field :phone_verified_at, :utc_datetime
   field :email_confirmed_at, :utc_datetime
 
-  has_many :identities, AuthKit.Models.Identity
+  has_many :identities, MyApp.Identity
 end
 ```
 
-The user token schema gets its fields from AuthKit:
+The identity and user token schemas get their fields from AuthKit:
 
 ```elixir
+defmodule MyApp.Identity do
+  use Ecto.Schema
+  use AuthKit.Identity
+
+  schema "identities" do
+    auth_kit_identity_fields()
+    timestamps()
+  end
+end
+
 defmodule MyApp.UserToken do
   use Ecto.Schema
   use AuthKit.UserToken

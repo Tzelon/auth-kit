@@ -1,5 +1,5 @@
 defmodule AuthKitWeb.Auth.MagicLinkTest do
-  alias AuthKit.Models.Identity
+  alias AuthKit.Test.Identity
   alias AuthKit.Auth
   alias AuthKit.Accounts.Users
   alias AuthKit.Test.User

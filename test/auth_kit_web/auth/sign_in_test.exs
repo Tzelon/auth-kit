@@ -1,7 +1,7 @@
 defmodule AuthKitWeb.Auth.UserSignInTest do
   use AuthKitWeb.ConnCase, async: true
 
-  alias AuthKit.Models.Identity
+  alias AuthKit.Test.Identity
   alias AuthKit.Auth
   alias AuthKit.Accounts.Users
   alias AuthKit.Test.User

@@ -15,7 +15,7 @@ defmodule AuthKit.Test.User do
     field :avatar_url, :string
     field :email_confirmed_at, :utc_datetime
 
-    has_many :identities, AuthKit.Models.Identity
+    has_many :identities, AuthKit.Test.Identity
 
     timestamps(type: :utc_datetime)
   end
