@@ -12,7 +12,7 @@ defmodule AuthKit.Test.User do
     field :phone_number, :string
     field :phone_number_verified, :boolean
     field :avatar_url, :string
-    field :confirmed_at, :utc_datetime
+    field :email_confirmed_at, :utc_datetime
 
     has_many :identities, AuthKit.Models.Identity
 

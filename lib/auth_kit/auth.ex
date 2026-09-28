@@ -170,7 +170,7 @@ defmodule AuthKit.Auth do
   def verify_login_token(token) do
     with {:ok, query} <- UserToken.verify_magic_link_token_query(token) do
       case Repo.one(query) do
-        {%{confirmed_at: nil} = user, _token} ->
+        {%{email_confirmed_at: nil} = user, _token} ->
           confirm_user_email(user)
 
         {user, token} ->
@@ -194,11 +194,11 @@ defmodule AuthKit.Auth do
   removes the password identity and expires all tokens, including
   sessions. Already confirmed users are returned unchanged.
   """
-  def confirm_user_email(%{confirmed_at: nil} = user) when is_struct(user, @user) do
+  def confirm_user_email(%{email_confirmed_at: nil} = user) when is_struct(user, @user) do
     now = DateTime.utc_now() |> DateTime.truncate(:second)
 
     user
-    |> change(confirmed_at: now)
+    |> change(email_confirmed_at: now)
     |> update_user_and_delete_all_tokens(delete_password: true)
   end
 

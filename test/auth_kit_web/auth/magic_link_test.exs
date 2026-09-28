@@ -53,7 +53,7 @@ defmodule AuthKitWeb.Auth.MagicLinkTest do
           assert token = get_session(conn, :user_token)
 
           user = assert Users.get_by_session_token(token)
-          assert user.confirmed_at
+          assert user.email_confirmed_at
       end
     end
   end

@@ -195,8 +195,6 @@ defmodule AuthKit.Auth.Whatsapp do
       {nil, %UserToken{confirmed_at: _confirmed_at}} ->
         {:error, :not_found}
 
-      # A WhatsApp login proves the phone number, not the email, so it must
-      # not set confirmed_at: Auth.confirm_user_email/1 relies on it.
       {user, token} ->
         Repo.delete!(token)
         {:ok, user, []}
