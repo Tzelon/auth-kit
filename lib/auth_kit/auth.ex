@@ -2,11 +2,13 @@ defmodule AuthKit.Auth do
   import Ecto.Query
   import Ecto.Changeset
 
-  alias AuthKit.Models.{User, Identity, UserToken}
+  alias AuthKit.Models.{Identity, UserToken}
   alias AuthKit.Repo
 
+  @user AuthKit.Config.user_schema()
+
   def fetch_user_by_email(email, opts \\ []) do
-    user = Repo.one(from u in User, where: u.email == ^email)
+    user = Repo.one(from u in @user, where: u.email == ^email)
 
     if preload = Keyword.get(opts, :preload) do
       user |> Repo.preload(preload)
@@ -39,7 +41,7 @@ defmodule AuthKit.Auth do
       Defaults to `true`.
   """
   def create_user(attrs, opts \\ []) do
-    %User{}
+    struct(@user)
     |> cast(attrs, [:email, :name, :avatar_url, :phone_number, :phone_number_verified])
     |> validate_required([:email, :name])
     |> validate_email(opts)
@@ -95,7 +97,7 @@ defmodule AuthKit.Auth do
       {:error, %Ecto.Changeset{}}
 
   """
-  def update_user_tokens(%User{} = user, attrs, _opts \\ []) do
+  def update_user_tokens(user, attrs, _opts \\ []) when is_struct(user, @user) do
     if identity = get_user_identity_by_provider(user, attrs.provider) do
       {:ok, _identity} = update_identity_tokens(identity, attrs)
       {:ok, Repo.preload(user, :identities, force: true)}
@@ -123,8 +125,8 @@ defmodule AuthKit.Auth do
     |> Repo.update()
   end
 
-  @spec get_user_identity_by_provider(User.t(), binary()) :: list(Identity)
-  def get_user_identity_by_provider(%User{id: id} = _user, provider) do
+  @spec get_user_identity_by_provider(struct(), binary()) :: struct() | nil
+  def get_user_identity_by_provider(%{id: id} = user, provider) when is_struct(user, @user) do
     Repo.one(
       from idn in Identity,
         where:
@@ -133,7 +135,7 @@ defmodule AuthKit.Auth do
     )
   end
 
-  def generate_session_token(%User{} = user) do
+  def generate_session_token(user) when is_struct(user, @user) do
     {token, user_token} = UserToken.build_session_token(user)
     Repo.insert!(user_token)
     token
@@ -147,7 +149,7 @@ defmodule AuthKit.Auth do
     :ok
   end
 
-  def generate_login_token(%User{} = user) do
+  def generate_login_token(user) when is_struct(user, @user) do
     {encoded_token, user_token} = UserToken.build_email_token(user, "login")
     Repo.insert!(user_token)
     encoded_token
@@ -168,7 +170,7 @@ defmodule AuthKit.Auth do
   def verify_login_token(token) do
     with {:ok, query} <- UserToken.verify_magic_link_token_query(token) do
       case Repo.one(query) do
-        {%User{confirmed_at: nil} = user, _token} ->
+        {%{confirmed_at: nil} = user, _token} ->
           confirm_user_email(user)
 
         {user, token} ->
@@ -192,7 +194,7 @@ defmodule AuthKit.Auth do
   removes the password identity and expires all tokens, including
   sessions. Already confirmed users are returned unchanged.
   """
-  def confirm_user_email(%User{confirmed_at: nil} = user) do
+  def confirm_user_email(%{confirmed_at: nil} = user) when is_struct(user, @user) do
     now = DateTime.utc_now() |> DateTime.truncate(:second)
 
     user
@@ -200,7 +202,7 @@ defmodule AuthKit.Auth do
     |> update_user_and_delete_all_tokens(delete_password: true)
   end
 
-  def confirm_user_email(%User{} = user), do: {:ok, user, []}
+  def confirm_user_email(user) when is_struct(user, @user), do: {:ok, user, []}
 
   @doc """
   Gets the user linked to the given provider identity, such as a
@@ -208,7 +210,7 @@ defmodule AuthKit.Auth do
   """
   def fetch_user_by_identity(provider, identity) do
     Repo.one(
-      from u in User,
+      from u in @user,
         join: idn in assoc(u, :identities),
         where: idn.provider == ^to_string(provider) and idn.identity == ^identity
     )
@@ -282,7 +284,7 @@ defmodule AuthKit.Auth do
       Defaults to `false`.
   """
   def update_user_and_delete_all_tokens(changeset, opts \\ []) do
-    %{data: %User{} = user} = changeset
+    %{data: user} = changeset
 
     with {:ok, %{user: user, tokens_to_expire: expired_tokens}} <-
            Ecto.Multi.new()

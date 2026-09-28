@@ -19,3 +19,15 @@ Documentation can be generated with [ExDoc](https://github.com/elixir-lang/ex_do
 and published on [HexDocs](https://hexdocs.pm). Once published, the docs can
 be found at <https://hexdocs.pm/auth_kit>.
 
+
+## Configuration
+
+```elixir
+config :auth_kit,
+  repo: MyApp.Repo,
+  # Your user schema. Defaults to AuthKit.Models.User.
+  user: MyApp.User
+```
+
+`:user` is read at compile time. After changing it, run
+`mix deps.compile auth_kit --force`.
