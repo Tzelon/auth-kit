@@ -10,18 +10,7 @@ defmodule AuthKit.Auth.Whatsapp do
   alias AuthKit.Auth
   alias AuthKit.Auth.Params
 
-  alias AuthKit.Auth.Whatsapp
-
-  use AuthKit.Schema, prefix: "usr_"
-
-  schema "users" do
-    field :phone_number, :string
-    field :name, :string
-    field :phone_number_verified, :boolean
-    field :confirmed_at, :utc_datetime
-
-    timestamps(type: :utc_datetime)
-  end
+  @user AuthKit.Config.user_schema()
 
   @typedoc """
   Options for configuring whatsapp authentication.
@@ -123,7 +112,7 @@ defmodule AuthKit.Auth.Whatsapp do
 
   defp find_or_maybe_create_user(params, opts) do
     cond do
-      user = Repo.get_by(Whatsapp, phone_number: params["phone_number"]) ->
+      user = Repo.get_by(@user, phone_number: params["phone_number"]) ->
         {:ok, user}
 
       not Keyword.get(opts, :auto_signup, false) ->
@@ -143,7 +132,7 @@ defmodule AuthKit.Auth.Whatsapp do
   end
 
   defp create_user(params, opts) do
-    %Whatsapp{}
+    struct(@user)
     |> cast(params, [:name, :phone_number, :phone_number_verified])
     |> validate_required([:phone_number])
     |> validate_length(:phone_number, max: 60)
@@ -203,7 +192,7 @@ defmodule AuthKit.Auth.Whatsapp do
       {_user, %UserToken{confirmed_at: nil}} ->
         {:error, :not_confirmed}
 
-      {%Whatsapp{confirmed_at: nil} = user, %UserToken{confirmed_at: _confirmed_at}} ->
+      {%{confirmed_at: nil} = user, %UserToken{confirmed_at: _confirmed_at}} ->
         now = DateTime.utc_now() |> DateTime.truncate(:second)
 
         user
