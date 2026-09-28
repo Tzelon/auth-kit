@@ -8,7 +8,7 @@ defmodule AuthKit.Auth do
   @user AuthKit.Config.user_schema()
 
   def fetch_user_by_email(email, opts \\ []) do
-    user = Repo.one(from u in @user, where: u.email == ^email)
+    user = Repo.one(from u in AuthKit.Config.user_schema(), where: u.email == ^email)
 
     if preload = Keyword.get(opts, :preload) do
       user |> Repo.preload(preload)
@@ -210,7 +210,7 @@ defmodule AuthKit.Auth do
   """
   def fetch_user_by_identity(provider, identity) do
     Repo.one(
-      from u in @user,
+      from u in AuthKit.Config.user_schema(),
         join: idn in assoc(u, :identities),
         where: idn.provider == ^to_string(provider) and idn.identity == ^identity
     )
