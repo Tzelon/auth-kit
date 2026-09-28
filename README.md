@@ -25,7 +25,7 @@ be found at <https://hexdocs.pm/auth_kit>.
 ```elixir
 config :auth_kit,
   repo: MyApp.Repo,
-  # Your user schema. Defaults to AuthKit.Models.User.
+  # Your user schema (required).
   user: MyApp.User
 ```
 
