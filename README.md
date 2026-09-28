@@ -31,3 +31,18 @@ config :auth_kit,
 
 `:user` is read at compile time. After changing it, run
 `mix deps.compile auth_kit --force`.
+
+A custom user schema needs these fields and association:
+
+```elixir
+schema "users" do
+  field :email, :string
+  field :name, :string
+  field :avatar_url, :string
+  field :phone_number, :string
+  field :phone_number_verified, :boolean
+  field :confirmed_at, :utc_datetime
+
+  has_many :identities, AuthKit.Models.Identity
+end
+```
