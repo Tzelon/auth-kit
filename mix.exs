@@ -7,6 +7,7 @@ defmodule AuthKit.MixProject do
       version: "0.1.0",
       elixir: "~> 1.20",
       start_permanent: Mix.env() == :prod,
+      elixirc_paths: elixirc_paths(Mix.env()),
       deps: deps(),
       source_url: "https://github.com/Tzelon/auth-kit"
     ]
@@ -18,6 +19,10 @@ defmodule AuthKit.MixProject do
       extra_applications: [:logger, :crypto, :public_key, :ssl, :inets]
     ]
   end
+
+  # Dependencies compile in :prod, so the test schemas never reach host apps.
+  defp elixirc_paths(:prod), do: ["lib"]
+  defp elixirc_paths(_env), do: ["lib", "test/support"]
 
   # Run "mix help deps" to learn about dependencies.
   defp deps do

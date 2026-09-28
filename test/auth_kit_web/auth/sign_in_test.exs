@@ -4,7 +4,7 @@ defmodule AuthKitWeb.Auth.UserSignInTest do
   alias AuthKit.Models.Identity
   alias AuthKit.Auth
   alias AuthKit.Accounts.Users
-  alias AuthKit.Models.User
+  alias AuthKit.Test.User
   alias AuthKit.Repo
 
   alias AuthKit.Auth.SignIn

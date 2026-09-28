@@ -2,7 +2,7 @@ defmodule AuthKitWeb.Auth.MagicLinkTest do
   alias AuthKit.Models.Identity
   alias AuthKit.Auth
   alias AuthKit.Accounts.Users
-  alias AuthKit.Models.User
+  alias AuthKit.Test.User
   alias AuthKit.Repo
   use AuthKitWeb.ConnCase, async: true
 
