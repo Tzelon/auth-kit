@@ -50,8 +50,8 @@ defmodule AuthKit.Auth.SignUp do
   Takes a map of signup parameters and creates a new user account.
   Returns the created user or an error tuple.
   """
-  @spec sign_up_email(Conn.t(), signup_params()) :: {:ok, user()} | {:error, signup_error()}
-  def sign_up_email(conn, params) do
+  @spec sign_up_email(Conn.t(), signup_params(), keyword()) :: Conn.t()
+  def sign_up_email(conn, params, opts \\ []) do
     types = %{
       email: :string,
       name: :string,
@@ -99,6 +99,8 @@ defmodule AuthKit.Auth.SignUp do
         password: password
       })
 
+    maybe_send_confirm_email(user, opts)
+
     token = Auth.generate_session_token(user)
     user_return_to = get_session(conn, :user_return_to)
 
@@ -110,6 +112,49 @@ defmodule AuthKit.Auth.SignUp do
   catch
     {:error, error} ->
       raise error
+  end
+
+  @doc """
+  Confirms the email from a `"confirm"` token sent after password sign-up.
+
+  The caller passes `send_confirm_email: fn token -> ... end` to
+  `sign_up_email/3`. Verifying the token calls `Auth.confirm_user_email/1`,
+  which removes a password set before the email was proven, then starts a
+  new session because that confirmation expires the old one.
+  """
+  def confirm_email(conn, params) do
+    types = %{token: :string}
+
+    %{"token" => token} =
+      case Params.validate(params, types, [:token]) do
+        {:ok, params} ->
+          params
+
+        {:error, errors} ->
+          throw({:error, HttpError.new(:bad_request, errors)})
+      end
+
+    case Auth.verify_confirm_token(token) do
+      {:ok, user, _} ->
+        session = Auth.generate_session_token(user)
+
+        conn
+        |> renew_session()
+        |> put_token_in_session(session)
+        |> redirect(to: signed_in_path(conn))
+
+      {:error, _reason} ->
+        redirect(conn, to: "/users/log-in?error=INVALID_TOKEN")
+    end
+  catch
+    {:error, error} ->
+      raise error
+  end
+
+  defp maybe_send_confirm_email(user, opts) do
+    if send_confirm_email = Keyword.get(opts, :send_confirm_email) do
+      send_confirm_email.(Auth.generate_email_token(user, "confirm"))
+    end
   end
 
   defp signed_in_path(_conn), do: "/"

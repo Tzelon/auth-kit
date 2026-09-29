@@ -150,10 +150,15 @@ defmodule AuthKit.Auth do
     :ok
   end
 
-  def generate_login_token(user) when is_struct(user, @user) do
-    {encoded_token, user_token} = UserToken.build_email_token(user, "login")
+  def generate_email_token(user, context)
+      when is_struct(user, @user) and context in ["login", "confirm", "reset_password"] do
+    {encoded_token, user_token} = UserToken.build_email_token(user, context)
     Repo.insert!(user_token)
     encoded_token
+  end
+
+  def generate_login_token(user) when is_struct(user, @user) do
+    generate_email_token(user, "login")
   end
 
   @doc """
@@ -187,8 +192,30 @@ defmodule AuthKit.Auth do
   end
 
   @doc """
+  Confirms the email by consuming a `"confirm"` token.
+
+  Calls `confirm_user_email/1`. On an unconfirmed account that also
+  removes the password and every token. An already confirmed account
+  keeps its password; only the used token is deleted.
+  """
+  def verify_confirm_token(token) do
+    with {:ok, query} <- UserToken.verify_email_token_query(token, "confirm"),
+         {user, token_record} <- Repo.one(query) do
+      result = confirm_user_email(user)
+
+      # Unconfirmed accounts have every token deleted inside
+      # confirm_user_email/1. Confirmed accounts are left as they are.
+      if user.email_confirmed_at, do: Repo.delete!(token_record)
+
+      result
+    else
+      _ -> {:error, :invalid_token}
+    end
+  end
+
+  @doc """
   Confirms the user's email once they have proven they own it, through
-  a magic link or a verified email from an OAuth provider.
+  a magic link, a confirm link, or a verified email from an OAuth provider.
 
   Password sign-up does not verify the email, so on an unconfirmed
   account the password may have been set by someone else. Confirming
