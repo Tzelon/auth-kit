@@ -70,8 +70,8 @@ Already supported: email + password, magic link, Google (OIDC), WhatsApp code si
 
 Better Auth's organization plugin, under the name tenant. Plan: [docs/tenants.md](docs/tenants.md).
 
-- [ ] Tenants, members, invitations, and the active tenant on the session
-- [ ] Static roles (`owner`, `admin`, `member`) and permission checks
+- [x] Tenants, members, invitations, and the active tenant on the session
+- [x] Static roles (`owner`, `admin`, `member`) and permission checks
 - [ ] Custom static roles
 - [ ] Dynamic roles stored per tenant
 - [ ] Teams inside a tenant

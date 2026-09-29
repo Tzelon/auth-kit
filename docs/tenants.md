@@ -1,5 +1,7 @@
 # Tenants
 
+The first slice is implemented in `AuthKit.Tenants`: tenants, members, invitations, the active tenant on the session, and the `owner`, `admin`, and `member` roles. Custom roles, dynamic roles, and teams are not built yet.
+
 Better Auth's organization plugin, renamed. A tenant is a shared workspace a user can belong to. Sign-in stays global: email, phone, and provider identity still identify one user, and a tenant is a membership on top of that user.
 
 AuthKit does not grow an HTTP client or a plugin registry for this. The host owns the tables, the routes, and the invitation email. `AuthKit.Tenants` is the context that creates rows, checks roles, and records which tenant a session is working in.
@@ -204,7 +206,7 @@ Passed per call, with defaults the host can set under `config :auth_kit, tenant_
 | `:invitation_limit` | `100` | Pending invitations in that tenant |
 | `:cancel_pending_on_reinvite` | `false` | |
 | `:send_invitation` | required on `invite/3` | `fn invitation, raw_token -> any end` |
-| `:changeset` | none | `fn struct, attrs -> changeset end` for host columns |
+| `:changeset` | none | `fn changeset, attrs -> changeset end` for host columns |
 
 A `before_*` hook returns `:ok` or `{:ok, attrs}` to continue, or `{:error, reason}` to stop the write. `after_*` hooks run after the transaction commits.
 

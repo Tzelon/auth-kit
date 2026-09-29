@@ -88,6 +88,10 @@ password, expires every token, and confirms the email. `change_password/2`
 checks the current password, updates the credential, and expires every token
 except the session making the request.
 
+## Tenants
+
+A tenant is a workspace a user belongs to. Sign-in stays global. Configure `tenant`, `tenant_member`, and `tenant_invitation`, and add `auth_kit_active_tenant_field/0` to the user token schema when sessions should remember a tenant. The host sends invitation email through the `:send_invitation` callback. See `AuthKit.Tenants` and `docs/tenants.md`.
+
 ## Bearer sessions
 
 Session tokens are raw bytes. `AuthKit.UserToken.encode_session_token/1`
