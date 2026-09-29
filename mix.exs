@@ -28,7 +28,9 @@ defmodule AuthKit.MixProject do
   defp deps do
     [
       {:plug, "~> 1.14"},
-      {:ecto, "~> 3.10"}
+      {:ecto, "~> 3.10"},
+      {:ecto_sql, "~> 3.14", only: [:dev, :test]},
+      {:ecto_sqlite3, "~> 0.25", only: [:dev, :test]}
     ]
   end
 end

@@ -82,12 +82,14 @@ defmodule AuthKit.Auth.SignUp do
     } =
       params
 
+    email = String.downcase(email)
+
     if Auth.fetch_user_by_email(email) do
       Logger.info("Sign-up attempt for existing email: #{email}")
       throw({:error, HttpError.new(:unprocessable_entity, "User already exists")})
     end
 
-    user = Auth.create_user(%{email: String.downcase(email), name: name, avatar_url: avatar_url})
+    user = Auth.create_user(%{email: email, name: name, avatar_url: avatar_url})
 
     _account =
       Auth.link_identity(%{
