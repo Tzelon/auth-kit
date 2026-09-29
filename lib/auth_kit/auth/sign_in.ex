@@ -99,6 +99,48 @@ defmodule AuthKit.Auth.SignIn do
   end
 
   @doc """
+  Changes the password for the signed-in user and keeps this session.
+  """
+  def change_password(conn, params) do
+    types = %{current_password: :string, password: :string}
+
+    %{"current_password" => current_password, "password" => password} =
+      case Params.validate(
+             params,
+             types,
+             [:current_password, :password],
+             &Params.validate_password_length/1
+           ) do
+        {:ok, params} ->
+          params
+
+        {:error, errors} ->
+          throw({:error, HttpError.new(:bad_request, errors)})
+      end
+
+    {token, conn} = ensure_user_token(conn)
+    user = token && Auth.fetch_user_by_session_token(token)
+
+    if user == nil do
+      throw({:error, HttpError.new(:unauthorized, "Not signed in")})
+    end
+
+    case Auth.change_password(user, current_password, password, except_token: token) do
+      {:ok, _user} ->
+        redirect(conn, to: signed_in_path(conn))
+
+      {:error, :invalid_password} ->
+        throw({:error, HttpError.new(:unauthorized, "Invalid password")})
+
+      {:error, %Ecto.Changeset{}} ->
+        throw({:error, HttpError.new(:bad_request, "Invalid password")})
+    end
+  catch
+    {:error, error} ->
+      raise error
+  end
+
+  @doc """
   Sets the password from a reset token, confirms the email, and signs in.
   """
   def reset_password(conn, params) do

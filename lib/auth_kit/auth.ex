@@ -214,6 +214,37 @@ defmodule AuthKit.Auth do
   end
 
   @doc """
+  Changes the password of a signed-in user.
+
+  Checks `current_password` with `valid_password?/2`, stores the new one on
+  the credential identity, and expires every other token. Pass the current
+  session as `:except_token` so that session stays valid.
+  `update_user_and_delete_all_tokens/2` cannot do this: it deletes every
+  token, including the one for this request.
+  """
+  def change_password(user, current_password, new_password, opts \\ [])
+      when is_struct(user, @user) do
+    identity = get_user_identity_by_provider(user, "credential")
+
+    if valid_password?(identity, current_password) == true do
+      case check_password_length(new_password) do
+        :ok ->
+          identity
+          |> change(password: AuthKit.Password.hash_pwd_salt(new_password))
+          |> Repo.update!()
+
+          expire_user_tokens(user, except_token: opts[:except_token])
+          {:ok, user}
+
+        {:error, changeset} ->
+          {:error, changeset}
+      end
+    else
+      {:error, :invalid_password}
+    end
+  end
+
+  @doc """
   Sets a new password from a `"reset_password"` token.
 
   The reset proves the user owns the email, so the email is confirmed.
