@@ -1,6 +1,6 @@
 # AuthKit
 
-Authentication building blocks for Elixir/Plug apps: email + password sign-up and sign-in (PBKDF2-SHA256 hashing), magic links, WhatsApp sign-in, Google sign-in via OpenID Connect, and sign-out.
+Authentication building blocks for Elixir/Plug apps: email + password sign-up and sign-in (PBKDF2-SHA256 hashing), email confirmation, password reset, magic links, WhatsApp sign-in, Google sign-in via OpenID Connect, bearer sessions, and sign-out.
 
 ## Installation
 
@@ -74,3 +74,23 @@ defmodule MyApp.UserToken do
   end
 end
 ```
+
+## Email confirmation and passwords
+
+Password sign-up accepts `send_confirm_email: fn token -> ... end`.
+`AuthKit.Auth.SignUp.confirm_email/2` checks that `"confirm"` token and calls
+`AuthKit.Auth.confirm_user_email/1`. On an account that was not yet confirmed
+this removes the password and every token, then starts a new session.
+
+`AuthKit.Auth.SignIn.request_password_reset/3` accepts
+`send_reset_password: fn token -> ... end`. `reset_password/2` stores the new
+password, expires every token, and confirms the email. `change_password/2`
+checks the current password, updates the credential, and expires every token
+except the session making the request.
+
+## Bearer sessions
+
+Session tokens are raw bytes. `AuthKit.UserToken.encode_session_token/1`
+base64url-encodes one for a header. `plug AuthKit.Auth.Bearer` reads
+`Authorization: Bearer <token>` and assigns `:current_user`.
+

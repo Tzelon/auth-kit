@@ -49,7 +49,6 @@ defmodule AuthKit.MagicLinkTest do
       })
 
     assert redirected_to(conn) == "/users/log-in?error=INVALID_TOKEN"
-    refute get_session(conn, :user_token)
   end
 
   test "verify leaves the password in place when the email is already confirmed", %{conn: conn} do

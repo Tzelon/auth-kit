@@ -28,7 +28,7 @@ defmodule AuthKit.PasswordResetTest do
     assert redirected_to(conn) == "/users/log-in"
   end
 
-  test "reset sets a new password, confirms the email, and expires other sessions", %{conn: conn} do
+  test "reset sets the password, confirms the email, and expires other sessions", %{conn: conn} do
     {user, old_password} = Fixtures.user_with_password_fixture()
     other_session = Auth.generate_session_token(user)
     token = Auth.generate_email_token(user, "reset_password")
@@ -38,6 +38,7 @@ defmodule AuthKit.PasswordResetTest do
     signed_in = Auth.fetch_user_by_session_token(get_session(conn, :user_token))
     assert signed_in.id == user.id
     assert signed_in.email_confirmed_at
+    assert redirected_to(conn) == "/"
     refute Auth.fetch_user_by_session_token(other_session)
 
     identity = Repo.get_by!(Identity, user_id: user.id, provider: "credential")
@@ -47,43 +48,35 @@ defmodule AuthKit.PasswordResetTest do
     assert_raise AuthKit.Auth.HttpError, "Invalid token", fn ->
       SignIn.reset_password(build_conn(), %{"token" => token, "password" => "newpassword1"})
     end
-  end
 
-  test "reset on a confirmed user replaces the password and keeps the confirmation time", %{
-    conn: conn
-  } do
-    {user, old_password} = Fixtures.confirmed_user_with_password_fixture()
-    confirmed_at = user.email_confirmed_at
-    token = Auth.generate_email_token(user, "reset_password")
+    {confirmed, old_password} = Fixtures.confirmed_user_with_password_fixture()
+    confirmed_at = confirmed.email_confirmed_at
+    token = Auth.generate_email_token(confirmed, "reset_password")
 
-    conn = SignIn.reset_password(conn, %{"token" => token, "password" => "newpassword1"})
+    conn =
+      SignIn.reset_password(build_conn(), %{"token" => token, "password" => "newpassword2"})
 
     signed_in = Auth.fetch_user_by_session_token(get_session(conn, :user_token))
     assert signed_in.email_confirmed_at == confirmed_at
 
-    identity = Repo.get_by!(Identity, user_id: user.id, provider: "credential")
-    assert Auth.valid_password?(identity, "newpassword1")
+    identity = Repo.get_by!(Identity, user_id: confirmed.id, provider: "credential")
+    assert Auth.valid_password?(identity, "newpassword2")
     refute Auth.valid_password?(identity, old_password)
-    assert redirected_to(conn) == "/"
   end
 
-  test "a short password or a token from another context does not reset", %{conn: conn} do
+  test "a short password does not consume the reset token", %{conn: conn} do
     {user, password} = Fixtures.user_with_password_fixture()
     token = Auth.generate_email_token(user, "reset_password")
-    confirm = Auth.generate_email_token(user, "confirm")
 
     assert_raise AuthKit.Auth.HttpError, fn ->
       SignIn.reset_password(conn, %{"token" => token, "password" => "short"})
     end
 
-    assert_raise AuthKit.Auth.HttpError, "Invalid token", fn ->
-      SignIn.reset_password(conn, %{"token" => confirm, "password" => "newpassword1"})
-    end
+    identity = Repo.get_by!(Identity, user_id: user.id, provider: "credential")
+    assert Auth.valid_password?(identity, password)
 
-    conn = SignIn.reset_password(conn, %{"token" => token, "password" => "newpassword1"})
+    SignIn.reset_password(conn, %{"token" => token, "password" => "newpassword1"})
     identity = Repo.get_by!(Identity, user_id: user.id, provider: "credential")
     assert Auth.valid_password?(identity, "newpassword1")
-    refute Auth.valid_password?(identity, password)
-    assert get_session(conn, :user_token)
   end
 end

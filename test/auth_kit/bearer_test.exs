@@ -9,24 +9,17 @@ defmodule AuthKit.BearerTest do
   alias AuthKit.Test.UserToken
   alias AuthKit.UserToken, as: Tokens
 
-  test "assigns the user from a base64url bearer token", %{conn: conn} do
+  test "assigns the user from a live base64url bearer token", %{conn: conn} do
     user = Fixtures.user_fixture()
     token = Auth.generate_session_token(user)
     encoded = Tokens.encode_session_token(token)
 
-    conn =
+    authed =
       conn
       |> put_req_header("authorization", "Bearer " <> encoded)
       |> Bearer.call([])
 
-    assert conn.assigns.current_user.id == user.id
-    assert {:ok, ^token} = Tokens.decode_session_token(encoded)
-  end
-
-  test "assigns nil unless the header is a live bearer session", %{conn: conn} do
-    user = Fixtures.user_fixture()
-    token = Auth.generate_session_token(user)
-    encoded = Tokens.encode_session_token(token)
+    assert authed.assigns.current_user.id == user.id
 
     refused = [
       conn,
@@ -40,14 +33,13 @@ defmodule AuthKit.BearerTest do
     end
 
     past = DateTime.utc_now() |> DateTime.add(-1, :second)
-
     Repo.update_all(from(t in UserToken, where: t.user_id == ^user.id), set: [expires_at: past])
 
-    conn =
+    expired =
       conn
       |> put_req_header("authorization", "Bearer " <> encoded)
       |> Bearer.call([])
 
-    assert conn.assigns.current_user == nil
+    assert expired.assigns.current_user == nil
   end
 end

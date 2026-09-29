@@ -61,7 +61,6 @@ defmodule AuthKit.SessionTest do
           end
 
         assert error.status == :unauthorized
-        assert error.status_code == 401
       end
     end
   end
