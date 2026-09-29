@@ -60,11 +60,13 @@ defmodule AuthKit.Auth.MagicLink do
           throw({:error, HttpError.new(:bad_request, errors)})
       end
 
+    email = String.downcase(email)
+
     user =
       if user = Auth.fetch_user_by_email(email) do
         user
       else
-        Auth.create_user(%{email: String.downcase(email), name: name})
+        Auth.create_user(%{email: email, name: name})
       end
 
     token = Auth.generate_login_token(user)

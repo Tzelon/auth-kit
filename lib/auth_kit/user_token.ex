@@ -27,6 +27,8 @@ defmodule AuthKit.UserToken do
   # It is very important to keep the magic link token expiry short,
   # since someone with access to the email may take over the account.
   @magic_link_validity_in_minutes 15
+  @confirm_validity_in_minutes 7 * 24 * 60
+  @reset_password_validity_in_minutes 24 * 60
   @code_validity_in_minutes 10
   @session_validity_in_days 60
 
@@ -78,6 +80,23 @@ defmodule AuthKit.UserToken do
        user_id: user.id,
        expires_at: expires_at
      )}
+  end
+
+  @doc """
+  Encodes a session token for an `Authorization: Bearer` header.
+
+  Session tokens are raw bytes. The header value is the base64url encoding
+  without padding.
+  """
+  def encode_session_token(token) when is_binary(token) do
+    Base.url_encode64(token, padding: false)
+  end
+
+  @doc """
+  Decodes a bearer token produced by `encode_session_token/1`.
+  """
+  def decode_session_token(encoded) when is_binary(encoded) do
+    Base.url_decode64(encoded, padding: false)
   end
 
   @doc """
@@ -177,18 +196,31 @@ defmodule AuthKit.UserToken do
   If found, the query returns a tuple of the form `{user, token}`.
 
   The given token is valid if it matches its hashed counterpart in the
-  database. This function also checks if the token is being used within
-  15 minutes. The context of a magic link token is always "login".
+  database and it is being used within the window for `"login"`.
   """
   def verify_magic_link_token_query(token) do
+    verify_email_token_query(token, "login")
+  end
+
+  @doc """
+  Checks an email token for any context and returns its lookup query.
+
+  If found, the query returns a tuple of the form `{user, token}`.
+
+  The token is valid when it matches its hashed counterpart, its `sent_to`
+  is still the user's email, and it is inside the window from
+  `minutes_for_context/1` (`"login"`, `"confirm"`, or `"reset_password"`).
+  """
+  def verify_email_token_query(token, context) when is_binary(token) and is_binary(context) do
     case Base.url_decode64(token, padding: false) do
       {:ok, decoded_token} ->
         hashed_token = :crypto.hash(@hash_algorithm, decoded_token)
+        minutes = minutes_for_context(context)
 
         query =
-          from token in by_token_and_context_query(hashed_token, "login"),
+          from token in by_token_and_context_query(hashed_token, context),
             join: user in assoc(token, :user),
-            where: token.inserted_at > ago(^@magic_link_validity_in_minutes, "minute"),
+            where: token.inserted_at > ago(^minutes, "minute"),
             where: token.sent_to == user.email,
             select: {user, token}
 
@@ -240,6 +272,8 @@ defmodule AuthKit.UserToken do
   end
 
   defp minutes_for_context("login"), do: @magic_link_validity_in_minutes
+  defp minutes_for_context("confirm"), do: @confirm_validity_in_minutes
+  defp minutes_for_context("reset_password"), do: @reset_password_validity_in_minutes
   defp minutes_for_context("whatsapp"), do: @code_validity_in_minutes
 
   @doc """

@@ -6,3 +6,7 @@ config :auth_kit,
   user: AuthKit.Test.User,
   identity: AuthKit.Test.Identity,
   user_token: AuthKit.Test.UserToken
+
+if config_env() == :test do
+  import_config "test.exs"
+end

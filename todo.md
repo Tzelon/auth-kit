@@ -6,9 +6,10 @@ Already supported: email + password, magic link, Google (OIDC), WhatsApp code si
 
 ## Email & password extras
 
-- [ ] Email verification (send link or code on sign-up, block or flag unverified users)
-- [ ] Password reset (forgot-password email + reset token)
-- [ ] Change password / change email for signed-in users
+- [x] Email verification (confirm token after password sign-up; `email_confirmed_at` stays unset until then)
+- [x] Password reset (forgot-password email + reset token)
+- [x] Change password for signed-in users
+- [ ] Change email for signed-in users
 - [ ] Have I Been Pwned check on sign-up and password change
 
 ## Passwordless & alternative sign-in
@@ -73,7 +74,7 @@ Already supported: email + password, magic link, Google (OIDC), WhatsApp code si
 
 ## API & machine authentication
 
-- [ ] Bearer token authentication (instead of cookies)
+- [x] Bearer token authentication (instead of cookies)
 - [ ] JWT issuing + JWKS endpoint
 - [ ] API keys
 - [ ] Device authorization grant (OAuth 2.0 device flow for TVs and CLIs)
