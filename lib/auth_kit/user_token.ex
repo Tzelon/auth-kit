@@ -83,6 +83,23 @@ defmodule AuthKit.UserToken do
   end
 
   @doc """
+  Encodes a session token for an `Authorization: Bearer` header.
+
+  Session tokens are raw bytes. The header value is the base64url encoding
+  without padding.
+  """
+  def encode_session_token(token) when is_binary(token) do
+    Base.url_encode64(token, padding: false)
+  end
+
+  @doc """
+  Decodes a bearer token produced by `encode_session_token/1`.
+  """
+  def decode_session_token(encoded) when is_binary(encoded) do
+    Base.url_decode64(encoded, padding: false)
+  end
+
+  @doc """
   Checks if the token is valid and returns its underlying lookup query.
 
   The query returns the user found by the token, if any.
