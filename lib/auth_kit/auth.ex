@@ -214,6 +214,29 @@ defmodule AuthKit.Auth do
   end
 
   @doc """
+  Sets a new password from a `"reset_password"` token.
+
+  The reset proves the user owns the email, so the email is confirmed.
+  Every token is expired. On an unconfirmed account `confirm_user_email/1`
+  removes the old password first; the password from this reset is the one
+  that remains.
+  """
+  def reset_password(token, password) when is_binary(password) do
+    with {:ok, query} <- UserToken.verify_email_token_query(token, "reset_password"),
+         {user, _token_record} <- Repo.one(query),
+         :ok <- check_password_length(password) do
+      hashed = AuthKit.Password.hash_pwd_salt(password)
+      {:ok, user, _} = confirm_user_email(user)
+      put_credential_password(user, hashed)
+      expire_user_tokens(user)
+      {:ok, user}
+    else
+      {:error, %Ecto.Changeset{} = changeset} -> {:error, changeset}
+      _ -> {:error, :invalid_token}
+    end
+  end
+
+  @doc """
   Confirms the user's email once they have proven they own it, through
   a magic link, a confirm link, or a verified email from an OAuth provider.
 
@@ -325,6 +348,52 @@ defmodule AuthKit.Auth do
            |> Repo.transaction() do
       {:ok, user, expired_tokens}
     end
+  end
+
+  defp check_password_length(password) do
+    changeset =
+      {%{}, %{password: :string}}
+      |> cast(%{password: password}, [:password])
+      |> AuthKit.Auth.Params.validate_password_length()
+
+    if changeset.valid?, do: :ok, else: {:error, changeset}
+  end
+
+  defp put_credential_password(user, hashed_password) do
+    case get_user_identity_by_provider(user, "credential") do
+      nil ->
+        link_identity(
+          %{
+            user_id: user.id,
+            provider: "credential",
+            identity: user.id,
+            password: hashed_password
+          },
+          hash_password: false
+        )
+
+      identity ->
+        identity
+        |> change(password: hashed_password)
+        |> Repo.update!()
+    end
+  end
+
+  defp expire_user_tokens(user, opts \\ []) do
+    except = Keyword.get(opts, :except_token)
+
+    query =
+      case except do
+        nil ->
+          UserToken.by_user_and_contexts_query(user, :all)
+
+        token ->
+          from t in AuthKit.Config.user_token_schema(),
+            where: t.user_id == ^user.id,
+            where: t.context != "session" or t.token != ^token
+      end
+
+    Repo.delete_all(query)
   end
 
   defp maybe_delete_password(multi, user, opts) do

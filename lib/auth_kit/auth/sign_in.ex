@@ -67,5 +67,71 @@ defmodule AuthKit.Auth.SignIn do
       raise error
   end
 
+  @doc """
+  Emails a `"reset_password"` token.
+
+  `opts` must include `send_reset_password: fn token -> ... end`, the same
+  shape as a magic-link sender. An unknown email still redirects, so the
+  response does not reveal whether the account exists.
+  """
+  def request_password_reset(conn, params, opts) do
+    types = %{email: :string}
+
+    %{"email" => email} =
+      case Params.validate(params, types, [:email], &Params.validate_email_format/1) do
+        {:ok, params} ->
+          params
+
+        {:error, errors} ->
+          throw({:error, HttpError.new(:bad_request, errors)})
+      end
+
+    if user = Auth.fetch_user_by_email(String.downcase(email)) do
+      token = Auth.generate_email_token(user, "reset_password")
+      send_reset_password = Keyword.fetch!(opts, :send_reset_password)
+      send_reset_password.(token)
+    end
+
+    redirect(conn, to: "/users/log-in")
+  catch
+    {:error, error} ->
+      raise error
+  end
+
+  @doc """
+  Sets the password from a reset token, confirms the email, and signs in.
+  """
+  def reset_password(conn, params) do
+    types = %{token: :string, password: :string}
+
+    %{"token" => token, "password" => password} =
+      case Params.validate(params, types, [:token, :password], &Params.validate_password_length/1) do
+        {:ok, params} ->
+          params
+
+        {:error, errors} ->
+          throw({:error, HttpError.new(:bad_request, errors)})
+      end
+
+    case Auth.reset_password(token, password) do
+      {:ok, user} ->
+        session = Auth.generate_session_token(user)
+
+        conn
+        |> renew_session()
+        |> put_token_in_session(session)
+        |> redirect(to: signed_in_path(conn))
+
+      {:error, :invalid_token} ->
+        throw({:error, HttpError.new(:bad_request, "Invalid token")})
+
+      {:error, %Ecto.Changeset{}} ->
+        throw({:error, HttpError.new(:bad_request, "Invalid password")})
+    end
+  catch
+    {:error, error} ->
+      raise error
+  end
+
   defp signed_in_path(_conn), do: "/"
 end
