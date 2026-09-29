@@ -34,7 +34,8 @@ defmodule AuthKit.UserToken do
 
   defmacro __using__(_opts) do
     quote do
-      import AuthKit.UserToken, only: [auth_kit_user_token_fields: 0]
+      import AuthKit.UserToken,
+        only: [auth_kit_user_token_fields: 0, auth_kit_active_tenant_field: 0]
     end
   end
 
@@ -52,6 +53,18 @@ defmodule AuthKit.UserToken do
       belongs_to :user, AuthKit.Config.user_schema()
 
       timestamps(type: :utc_datetime, updated_at: false)
+    end
+  end
+
+  @doc """
+  Adds `active_tenant_id` to the session token.
+
+  Call this next to `auth_kit_user_token_fields/0` when the app uses tenants.
+  The column stays off schemas that do not call it.
+  """
+  defmacro auth_kit_active_tenant_field do
+    quote do
+      belongs_to :active_tenant, AuthKit.Config.tenant_schema()
     end
   end
 

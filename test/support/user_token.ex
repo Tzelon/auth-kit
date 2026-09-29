@@ -6,5 +6,6 @@ defmodule AuthKit.Test.UserToken do
 
   schema "users_tokens" do
     auth_kit_user_token_fields()
+    auth_kit_active_tenant_field()
   end
 end

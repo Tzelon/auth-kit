@@ -8,12 +8,17 @@ defmodule AuthKit.Repo do
   def repo, do: Application.fetch_env!(:auth_kit, :repo)
 
   def one(queryable, opts \\ []), do: repo().one(queryable, opts)
+  def all(queryable, opts \\ []), do: repo().all(queryable, opts)
+  def get(queryable, id, opts \\ []), do: repo().get(queryable, id, opts)
   def get_by(queryable, clauses, opts \\ []), do: repo().get_by(queryable, clauses, opts)
+  def exists?(queryable, opts \\ []), do: repo().exists?(queryable, opts)
   def preload(structs, preloads, opts \\ []), do: repo().preload(structs, preloads, opts)
+  def insert(struct, opts \\ []), do: repo().insert(struct, opts)
   def insert!(struct, opts \\ []), do: repo().insert!(struct, opts)
   def update(changeset, opts \\ []), do: repo().update(changeset, opts)
   def update!(changeset, opts \\ []), do: repo().update!(changeset, opts)
   def delete!(struct, opts \\ []), do: repo().delete!(struct, opts)
   def delete_all(queryable, opts \\ []), do: repo().delete_all(queryable, opts)
+  def update_all(queryable, updates, opts \\ []), do: repo().update_all(queryable, updates, opts)
   def transaction(multi, opts \\ []), do: repo().transaction(multi, opts)
 end

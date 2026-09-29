@@ -66,9 +66,19 @@ Already supported: email + password, magic link, Google (OIDC), WhatsApp code si
 - [ ] WeChat
 - [ ] Zoom
 
+## Tenants
+
+Better Auth's organization plugin, under the name tenant. Plan: [docs/tenants.md](docs/tenants.md).
+
+- [x] Tenants, members, invitations, and the active tenant on the session
+- [x] Static roles (`owner`, `admin`, `member`) and permission checks
+- [ ] Custom static roles
+- [ ] Dynamic roles stored per tenant
+- [ ] Teams inside a tenant
+
 ## Enterprise
 
-- [ ] Single sign-on (OIDC and SAML, per organization or domain)
+- [ ] Single sign-on (OIDC and SAML, per tenant or domain)
 - [ ] SCIM user and group provisioning
 - [ ] Act as an OAuth 2.1 / OIDC provider (including MCP clients and client ID metadata documents)
 

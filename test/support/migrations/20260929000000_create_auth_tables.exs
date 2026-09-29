@@ -51,5 +51,48 @@ defmodule AuthKit.Test.Repo.Migrations.CreateAuthTables do
 
     create(index(:users_tokens, [:user_id]))
     create(unique_index(:users_tokens, [:context, :token]))
+
+    create table(:tenants, primary_key: false) do
+      add(:id, :binary_id, primary_key: true)
+      add(:name, :string, null: false)
+      add(:slug, :string, null: false)
+      add(:logo, :string)
+      add(:metadata, :map, default: %{})
+
+      timestamps(type: :utc_datetime)
+    end
+
+    create(unique_index(:tenants, [:slug]))
+
+    create table(:tenant_members, primary_key: false) do
+      add(:id, :binary_id, primary_key: true)
+      add(:role, {:array, :string}, null: false)
+      add(:tenant_id, references(:tenants, type: :binary_id, on_delete: :delete_all), null: false)
+      add(:user_id, references(:users, type: :binary_id, on_delete: :delete_all), null: false)
+
+      timestamps(type: :utc_datetime)
+    end
+
+    create(unique_index(:tenant_members, [:tenant_id, :user_id]))
+
+    create table(:tenant_invitations, primary_key: false) do
+      add(:id, :binary_id, primary_key: true)
+      add(:email, :string, null: false)
+      add(:role, {:array, :string}, null: false)
+      add(:status, :string, null: false, default: "pending")
+      add(:token, :binary, null: false)
+      add(:expires_at, :utc_datetime_usec, null: false)
+
+      add(:tenant_id, references(:tenants, type: :binary_id, on_delete: :delete_all), null: false)
+      add(:inviter_id, references(:users, type: :binary_id, on_delete: :delete_all), null: false)
+
+      timestamps(type: :utc_datetime)
+    end
+
+    create(index(:tenant_invitations, [:tenant_id, :email]))
+
+    alter table(:users_tokens) do
+      add(:active_tenant_id, references(:tenants, type: :binary_id, on_delete: :nilify_all))
+    end
   end
 end
