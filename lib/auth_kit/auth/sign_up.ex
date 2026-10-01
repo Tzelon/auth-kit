@@ -61,7 +61,7 @@ defmodule AuthKit.Auth.SignUp do
     }
 
     params =
-      case Params.validate(params, types, [:email, :password], fn changeset ->
+      case Params.validate(params, types, [:name, :email, :password], fn changeset ->
              changeset
              |> Params.validate_email_format()
              |> Params.validate_password_length()

@@ -59,7 +59,8 @@ defmodule AuthKit.Auth.ConnHelpers do
     |> put_session(:live_socket_id, "users_sessions:#{Base.url_encode64(token)}")
   end
 
-  def maybe_write_remember_me_cookie(conn, token, %{"remember_me" => "true"}) do
+  def maybe_write_remember_me_cookie(conn, token, %{"remember_me" => remember_me})
+      when remember_me in [true, "true"] do
     put_resp_cookie(conn, @remember_me_cookie, token, @remember_me_options)
   end
 

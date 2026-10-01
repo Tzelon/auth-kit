@@ -311,7 +311,7 @@ defmodule AuthKit.Auth do
 
   def valid_password?(_, _) do
     AuthKit.Password.no_user_verify()
-    {:error, :invalide_password}
+    false
   end
 
   defp validate_email(changeset, opts) do

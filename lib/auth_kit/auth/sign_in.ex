@@ -40,10 +40,13 @@ defmodule AuthKit.Auth.SignIn do
           throw({:error, HttpError.new(:bad_request, errors)})
       end
 
+    email = String.downcase(email)
     user = Auth.fetch_user_by_email(email, preload: [:identities])
 
     if user == nil do
       Logger.error("User not found", email: email)
+      # Hash anyway so an unknown email takes as long as a wrong password.
+      AuthKit.Password.no_user_verify()
       throw({:error, HttpError.new(:unauthorized, "Invalid email or password")})
     end
 
