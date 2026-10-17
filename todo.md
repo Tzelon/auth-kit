@@ -86,7 +86,8 @@ Better Auth's organization plugin, under the name tenant. Plan: [docs/tenants.md
 
 - [x] Bearer token authentication (instead of cookies)
 - [ ] JWT issuing + JWKS endpoint
-- [ ] API keys
+- [x] API keys (user-owned, optional tenant scope)
+- [ ] API key rate limiting, refill, and organization-owned keys
 - [ ] Device authorization grant (OAuth 2.0 device flow for TVs and CLIs)
 - [ ] Agent auth (identities and capabilities for AI agents)
 

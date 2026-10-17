@@ -150,6 +150,47 @@ defmodule AuthKit.Auth do
     :ok
   end
 
+  @doc """
+  Creates an API key for `user`. See `AuthKit.ApiKey.create_api_key/2`.
+  """
+  def create_api_key(user, opts \\ []), do: AuthKit.ApiKey.create_api_key(user, opts)
+
+  @doc """
+  Checks an API key. See `AuthKit.ApiKey.verify_api_key/2`.
+  """
+  def verify_api_key(key, opts \\ []), do: AuthKit.ApiKey.verify_api_key(key, opts)
+
+  @doc """
+  Returns one API key without its secret. See `AuthKit.ApiKey.get_api_key/2`.
+  """
+  def get_api_key(user, id), do: AuthKit.ApiKey.get_api_key(user, id)
+
+  @doc """
+  Updates API key metadata. See `AuthKit.ApiKey.update_api_key/3`.
+  """
+  def update_api_key(user, id, opts \\ []), do: AuthKit.ApiKey.update_api_key(user, id, opts)
+
+  @doc """
+  Lists API keys without secrets. See `AuthKit.ApiKey.list_api_keys/2`.
+  """
+  def list_api_keys(user, opts \\ []), do: AuthKit.ApiKey.list_api_keys(user, opts)
+
+  @doc """
+  Deletes one API key. See `AuthKit.ApiKey.delete_api_key/2`.
+  """
+  def delete_api_key(user, id), do: AuthKit.ApiKey.delete_api_key(user, id)
+
+  @doc """
+  Deletes one API key. Same as `delete_api_key/2`.
+  """
+  def revoke_api_key(user, id), do: AuthKit.ApiKey.revoke_api_key(user, id)
+
+  @doc """
+  Deletes expired API keys. See `AuthKit.ApiKey.delete_all_expired_api_keys/1`.
+  """
+  def delete_all_expired_api_keys(opts \\ []),
+    do: AuthKit.ApiKey.delete_all_expired_api_keys(opts)
+
   def generate_email_token(user, context)
       when is_struct(user, @user) and context in ["login", "confirm", "reset_password"] do
     {encoded_token, user_token} = UserToken.build_email_token(user, context)

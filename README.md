@@ -96,5 +96,27 @@ A tenant is a workspace a user belongs to. Sign-in stays global. Configure `tena
 
 Session tokens are raw bytes. `AuthKit.UserToken.encode_session_token/1`
 base64url-encodes one for a header. `plug AuthKit.Auth.Bearer` reads
-`Authorization: Bearer <token>` and assigns `:current_user`.
+`Authorization: Bearer <token>` and assigns `:current_user`. The same plug
+accepts an API key in that header, or in `x-api-key`.
+
+## API keys
+
+Long-lived credentials for scripts and CI, following Better Auth's
+[API key plugin](https://better-auth.com/docs/plugins/api-key).
+`AuthKit.ApiKey.create_api_key/2` (also on `AuthKit.Auth`) returns the
+plaintext key once. The database stores only its SHA-256 hash on
+`users_tokens` with context `"api"`. `list_api_keys/2` and `get_api_key/2`
+return name, prefix, start, timestamps, expiry, and last use, never the
+secret. `delete_api_key/2` and `revoke_api_key/2` remove one key.
+`verify_api_key/2` checks it.
+
+Add `auth_kit_api_key_fields/0` to the user token schema and run the
+migration in `docs/api_keys.md`. Pass `tenant_id:` or `organization_id:` to
+scope a key to a tenant the user belongs to. Removing that membership
+revokes those keys. A scoped key sets `:current_tenant_id` on the bearer
+plug.
+
+Rate limiting, refill, and organization-owned keys (the tenant is the owner,
+rather than a scope on a user's key) are not implemented yet. Passing rate
+limit or refill options returns `{:error, {:not_supported, field}}`.
 

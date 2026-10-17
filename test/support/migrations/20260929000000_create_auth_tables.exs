@@ -46,6 +46,18 @@ defmodule AuthKit.Test.Repo.Migrations.CreateAuthTables do
       add(:expires_at, :utc_datetime_usec)
       add(:user_id, references(:users, type: :binary_id, on_delete: :delete_all))
 
+      # API keys (context "api"). Host apps add the same columns; see docs/api_keys.md.
+      add(:name, :string)
+      add(:prefix, :string)
+      add(:start, :string)
+      add(:config_id, :string)
+      add(:enabled, :boolean, default: true)
+      add(:last_request, :utc_datetime_usec)
+      add(:metadata, :map)
+      add(:permissions, :map)
+      add(:remaining, :integer)
+      add(:updated_at, :utc_datetime_usec)
+
       timestamps(type: :utc_datetime, updated_at: false)
     end
 

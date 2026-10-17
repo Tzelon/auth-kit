@@ -35,7 +35,11 @@ defmodule AuthKit.UserToken do
   defmacro __using__(_opts) do
     quote do
       import AuthKit.UserToken,
-        only: [auth_kit_user_token_fields: 0, auth_kit_active_tenant_field: 0]
+        only: [
+          auth_kit_user_token_fields: 0,
+          auth_kit_active_tenant_field: 0,
+          auth_kit_api_key_fields: 0
+        ]
     end
   end
 
@@ -65,6 +69,38 @@ defmodule AuthKit.UserToken do
   defmacro auth_kit_active_tenant_field do
     quote do
       belongs_to :active_tenant, AuthKit.Config.tenant_schema()
+    end
+  end
+
+  @doc """
+  Adds the columns an API key stores beside the hashed `token`.
+
+  Call this inside the user token schema when the app issues API keys.
+  Host apps migrate the columns themselves. Schemas that do not call
+  this macro stay as they are.
+
+      schema "users_tokens" do
+        auth_kit_user_token_fields()
+        auth_kit_api_key_fields()
+      end
+
+  `token` is the SHA-256 digest of the plaintext key, the same hash email
+  tokens use. `prefix` and `start` are safe to display. `expires_at` from
+  `auth_kit_user_token_fields/0` stays null when the key does not expire.
+  `last_request` is the last successful verification (Better Auth's `lastRequest`).
+  """
+  defmacro auth_kit_api_key_fields do
+    quote do
+      field :name, :string
+      field :prefix, :string
+      field :start, :string
+      field :config_id, :string
+      field :enabled, :boolean, default: true
+      field :last_request, :utc_datetime_usec
+      field :metadata, :map
+      field :permissions, :map
+      field :remaining, :integer
+      field :updated_at, :utc_datetime_usec
     end
   end
 
