@@ -54,6 +54,12 @@ defmodule AuthKit.DeviceTest do
     assert view.client_id == "demo-cli"
     assert view.scope == "openid profile"
 
+    approval = Device.approval_body({:ok, view})
+    assert approval["status"] == "pending"
+    assert approval["client_id"] == "demo-cli"
+    assert approval["scope"] == "openid profile"
+    assert Device.approval_body({:error, :invalid_grant})["error"] == "invalid_grant"
+
     assert {:error, :authorization_pending} = poll(issued.device_code)
 
     messy = issued.user_code |> String.downcase() |> String.replace("-", " ")
@@ -287,7 +293,26 @@ defmodule AuthKit.DeviceTest do
     assert authed.assigns.current_api_key.tenant_scoped == true
   end
 
-  test "a scoped grant stays put when the key cannot be issued" do
+  test "deny-after-approve cancels the grant so no key is issued" do
+    user = Fixtures.user_fixture()
+    other = Fixtures.user_fixture()
+    {:ok, issued} = Auth.request_device_authorization(client_id: "demo-cli")
+
+    assert {:ok, %{status: "approved"}} =
+             Auth.approve_device_authorization(user, issued.user_code)
+
+    assert {:error, :access_denied} = Auth.deny_device_authorization(other, issued.user_code)
+    assert device_row!(issued.device_code).status == "approved"
+
+    assert {:ok, %{status: "denied"}} = Auth.deny_device_authorization(user, issued.user_code)
+    assert device_row!(issued.device_code).status == "denied"
+
+    assert {:error, :access_denied} = poll(issued.device_code)
+    assert {:error, :access_denied} = poll(issued.device_code)
+    assert {:ok, %{api_keys: [], total: 0}} = Auth.list_api_keys(user)
+  end
+
+  test "member-removed-then-readded does not mint a key" do
     owner = Fixtures.user_fixture()
     user = Fixtures.user_fixture()
     slug = "device-gap-#{System.unique_integer([:positive])}"
@@ -305,7 +330,156 @@ defmodule AuthKit.DeviceTest do
     Repo.delete!(member)
 
     assert {:error, :access_denied} = poll(issued.device_code)
-    assert device_row!(issued.device_code).status == "approved"
+    refute device_row(issued.device_code)
+    assert {:ok, %{api_keys: [], total: 0}} = Auth.list_api_keys(user)
+
+    assert {:ok, _member} =
+             Tenants.add_member(owner, tenant, %{user_id: user.id, role: ["member"]})
+
+    assert {:error, :invalid_grant} = poll(issued.device_code)
+    assert {:ok, %{api_keys: [], total: 0}} = Auth.list_api_keys(user)
+  end
+
+  test "user code attempts lock out after the budget is exhausted" do
+    user = Fixtures.user_fixture()
+
+    assert Device.max_user_code_attempts() == 128
+
+    with_device_config([user_code_length: 7], fn ->
+      assert Device.max_user_code_attempts() == 4
+      {:ok, issued} = Auth.request_device_authorization(client_id: "demo-cli")
+
+      assert {:ok, %{status: "pending"}} =
+               Auth.get_device_authorization(user, issued.user_code)
+
+      for _ <- 1..4 do
+        assert {:error, :invalid_grant} = Auth.get_device_authorization(user, "AAAAAAA")
+      end
+
+      assert {:error, :too_many_attempts} =
+               Auth.get_device_authorization(user, issued.user_code)
+
+      assert {:error, :too_many_attempts} =
+               Auth.approve_device_authorization(user, issued.user_code)
+
+      assert {:error, :too_many_attempts} =
+               Auth.deny_device_authorization(user, issued.user_code)
+
+      assert device_row!(issued.device_code).status == "pending"
+      assert {:error, :authorization_pending} = poll(issued.device_code)
+
+      assert Device.error_body(:too_many_attempts)["error"] == "too_many_attempts"
+
+      past = DateTime.add(DateTime.utc_now(), -5, :second)
+
+      {1, _} =
+        from(t in UserToken, where: t.context == "device_attempt")
+        |> Repo.update_all(set: [expires_at: past])
+
+      assert {:ok, %{status: "pending"}} =
+               Auth.get_device_authorization(user, issued.user_code)
+    end)
+  end
+
+  test "concurrent user-code misses do not exceed the attempt budget" do
+    user = Fixtures.user_fixture()
+
+    with_device_config([user_code_length: 7], fn ->
+      limit = Device.max_user_code_attempts()
+      {:ok, issued} = Auth.request_device_authorization(client_id: "demo-cli")
+
+      results =
+        1..12
+        |> Task.async_stream(
+          fn _ -> Auth.get_device_authorization(user, "AAAAAAA") end,
+          max_concurrency: 12,
+          timeout: 15_000
+        )
+        |> Enum.map(fn
+          {:ok, result} -> result
+          {:exit, reason} -> flunk("lookup raised: #{inspect(reason)}")
+        end)
+
+      misses = Enum.count(results, &(&1 == {:error, :invalid_grant}))
+      lockouts = Enum.count(results, &(&1 == {:error, :too_many_attempts}))
+
+      assert misses <= limit
+      assert misses + lockouts == 12
+      assert lockouts >= 1
+
+      assert {:error, :too_many_attempts} =
+               Auth.approve_device_authorization(user, issued.user_code)
+
+      assert device_row!(issued.device_code).status == "pending"
+    end)
+  end
+
+  test "a 300-character scope is invalid_request" do
+    assert {:error, :invalid_request} =
+             Auth.request_device_authorization(
+               client_id: "demo-cli",
+               scope: String.duplicate("a", 300)
+             )
+
+    assert {:error, :invalid_request} =
+             Auth.request_device_authorization(
+               client_id: "demo-cli",
+               scope: String.duplicate("b", 256)
+             )
+
+    scope = String.duplicate("c", 255)
+
+    assert {:ok, issued} =
+             Auth.request_device_authorization(client_id: "demo-cli", scope: scope)
+
+    assert device_row!(issued.device_code).sent_to == scope
+  end
+
+  test "verification_uri_complete keeps user_code in the query, not the fragment" do
+    with_device_config([verification_uri: "https://example.com/device#approve"], fn ->
+      {:ok, issued} = Auth.request_device_authorization(client_id: "demo-cli")
+      uri = URI.parse(issued.verification_uri_complete)
+
+      assert uri.fragment == "approve"
+      assert uri.query == "user_code=#{URI.encode_www_form(issued.user_code)}"
+      refute issued.verification_uri_complete =~ ~r/#.*user_code/
+    end)
+
+    with_device_config([verification_uri: "/device?from=cli#approve"], fn ->
+      {:ok, issued} = Auth.request_device_authorization(client_id: "demo-cli")
+      uri = URI.parse(issued.verification_uri_complete)
+
+      assert uri.fragment == "approve"
+
+      assert uri.query ==
+               "from=cli&user_code=#{URI.encode_www_form(issued.user_code)}"
+    end)
+  end
+
+  test "a bad device api key setting fails at request time and a later change ends the grant" do
+    user = Fixtures.user_fixture()
+
+    with_device_config([api_key_name: String.duplicate("n", 40)], fn ->
+      assert {:error, :server_error} = Auth.request_device_authorization(client_id: "demo-cli")
+    end)
+
+    with_device_config([api_key_prefix: "no pe"], fn ->
+      assert {:error, :server_error} = Auth.request_device_authorization(client_id: "demo-cli")
+    end)
+
+    with_device_config([api_key_expires_in: 60], fn ->
+      assert {:error, :server_error} = Auth.request_device_authorization(client_id: "demo-cli")
+    end)
+
+    {:ok, issued} = Auth.request_device_authorization(client_id: "demo-cli")
+    assert {:ok, _} = Auth.approve_device_authorization(user, issued.user_code)
+
+    with_device_config([api_key_name: String.duplicate("n", 40)], fn ->
+      assert {:error, :server_error} = poll(issued.device_code)
+      refute device_row(issued.device_code)
+      assert {:error, :invalid_grant} = poll(issued.device_code)
+    end)
+
     assert {:ok, %{api_keys: [], total: 0}} = Auth.list_api_keys(user)
   end
 

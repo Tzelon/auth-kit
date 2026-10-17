@@ -139,7 +139,8 @@ defmodule AuthKit.UserToken do
   `slow_down`. `user_id` links the approving user and stays null until then,
   unless the code was pre-bound. `active_tenant_id` links the optional
   tenant chosen at approval. `name` stores the client id. `sent_to` stores
-  the optional scope. `last_request` is the last accepted poll.
+  the optional scope. That string is display-only and is not enforced on
+  the API key a poll mints. `last_request` is the last accepted poll.
   """
   defmacro auth_kit_device_fields do
     quote do
