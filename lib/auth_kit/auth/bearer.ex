@@ -6,7 +6,7 @@ defmodule AuthKit.Auth.Bearer do
 
       plug AuthKit.Auth.Bearer
 
-  `x-api-key` is checked first (Better Auth's default API key header).
+  `x-api-key` is checked first.
   Change the header with `config :auth_kit, api_key: [api_key_headers: "x-api-key"]`.
   A string or a list of header names is accepted.
 
