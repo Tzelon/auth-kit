@@ -1,0 +1,1443 @@
+defmodule AuthKit.Device do
+  @moduledoc """
+  OAuth 2.0 Device Authorization Grant (RFC 8628) for CLI login.
+
+  A grant is one `users_tokens` row with context `"device"`. The device code
+  and the user code are returned once, in plaintext. The row stores SHA-256
+  of each, the same digest email tokens and API keys use. Comparisons go
+  through `Plug.Crypto.secure_compare/2`.
+
+  The row reuses columns that are already on the token table:
+
+    * `token` — digest of the device code
+    * `user_code` — digest of the canonical user code (added by
+      `auth_kit_device_fields/0`, with `status` and `interval`)
+    * `name` — client id
+    * `sent_to` — optional scope
+    * `user_id` — approving user; null while the grant is pending, unless
+      it was pre-bound with `user_id:`
+    * `active_tenant_id` — tenant chosen at approval, when the host passes one
+    * `last_request` — last poll that was accepted
+    * `expires_at` — when the codes stop working
+
+  A second table would split approval, denial, polling, and expiry across
+  rows that have to move together. One row keeps those writes on a single
+  primary key. `user_id` and `active_tenant_id` are the linkage. There is
+  no separate linkage column.
+
+  Polling returns `:authorization_pending`, `:slow_down`, `:expired_token`,
+  `:access_denied`, `:server_error`, or `{:ok, token}`. On success the
+  plaintext in `access_token` is a user API key from `AuthKit.ApiKey`,
+  returned once. The CLI stores it and sends it to `AuthKit.Auth.Bearer`
+  as `Authorization: Bearer` or `x-api-key`. It is not a session token.
+  Session tokens are browser credentials. A CLI needs a long-lived key the
+  user can revoke without signing out of the browser.
+
+  Any poll error other than `:authorization_pending` and `:slow_down` is
+  terminal (RFC 8628 §3.5). Denying an approved grant cancels it. If the
+  key cannot be issued, that transaction deletes the grant, so a later
+  poll cannot mint a key.
+
+  `scope` is stored for the approval page and echoed on the token
+  response. It is not enforced on the API key. The key is a full
+  credential for the approving user, and for the tenant when approval
+  passed `tenant_id:`.
+
+  Failed user-code lookups are counted per authenticated user (RFC 8628
+  §5.1). The window is `expires_in`. Past that user's budget, their
+  approval calls return `:too_many_attempts` until the window ends.
+  Another account has its own budget and is not locked out. See
+  `max_user_code_attempts/0`.
+
+  `AuthKit.Auth` defines the same calls as this module.
+
+  The user token schema needs `auth_kit_api_key_fields/0` and
+  `auth_kit_device_fields/0`. A tenant on approval also needs
+  `auth_kit_active_tenant_field/0`. See `docs/device_flow.md`.
+  """
+
+  import Ecto.Changeset
+  import Ecto.Query
+
+  alias AuthKit.ApiKey
+  alias AuthKit.Config
+  alias AuthKit.Repo
+
+  @context "device"
+  @grant_type "urn:ietf:params:oauth:grant-type:device_code"
+  @alphabet "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+  @device_bytes 32
+  @max_attempts 3
+  @interval_step 5
+  @max_interval 300
+  @sweep_cooldown_ms 10_000
+  @default_expires_in 1800
+  @default_interval 5
+  @default_user_code_length 8
+  # Length 7 is the shortest code that still meets the advertised 2^-32 bar.
+  # Lengths 4–6 are refused in `user_code_length/0` and fall back to 8.
+  @min_user_code_length 7
+  @max_user_code_length 32
+  @max_client_id 191
+  # `name` and `sent_to` are Ecto `:string` columns. PostgreSQL stores those
+  # as varchar(255) and counts characters, not graphemes. UTF-8 uses at least
+  # one byte per character, so a 255-byte ceiling cannot exceed the column.
+  @max_varchar 255
+  @attempt_context "device_attempt"
+  # Half of 2^(entropy - 32). A code can sit in two adjacent windows.
+  # Capped so the counter fits in a 32-bit integer column.
+  @max_attempt_exponent 30
+
+  @device_fields ~w(user_code status interval)a
+  @reused_fields ~w(name last_request updated_at tenant_scoped)a
+
+  @descriptions %{
+    authorization_pending: "The authorization request is still pending.",
+    slow_down: "Polling too frequently. Increase the interval by 5 seconds.",
+    expired_token: "The device code has expired.",
+    access_denied: "The authorization request was denied.",
+    invalid_grant: "The device code is invalid, mismatched, or already used.",
+    invalid_client: "The client is not allowed to use the device flow.",
+    invalid_request: "The request is missing a required parameter.",
+    unsupported_grant_type: "grant_type must be urn:ietf:params:oauth:grant-type:device_code.",
+    server_error: "The device code could not be issued.",
+    invalid_user: "The user id is not valid.",
+    not_a_member: "The user is not a member of that tenant.",
+    not_found: "The tenant was not found.",
+    too_many_attempts: "Too many incorrect user-code attempts. Try again later."
+  }
+
+  # Poll `:server_error` is not "the device code could not be issued":
+  # the code was issued, and the access token was not.
+  @token_server_error "The access token could not be issued."
+
+  @dummy_hash :crypto.hash(:sha256, "auth-kit-device-dummy")
+
+  @doc """
+  The user token context for a device grant.
+  """
+  def context, do: @context
+
+  @doc """
+  The RFC 8628 `grant_type` a poll must send.
+  """
+  def grant_type, do: @grant_type
+
+  @doc """
+  Human-readable text for an error atom returned by this module.
+  """
+  def error_description(reason) when is_atom(reason) do
+    Map.get(@descriptions, reason, "The device authorization request failed.")
+  end
+
+  @doc """
+  RFC 8628 JSON body for a device authorization response.
+
+  `{:ok, map}` uses the string keys `device_code`, `user_code`,
+  `verification_uri`, `expires_in`, and `interval`.
+  `verification_uri_complete` is included when configured.
+  `{:error, atom}` uses `error` and `error_description`.
+  """
+  def code_body({:ok, result}) do
+    %{
+      "device_code" => result.device_code,
+      "user_code" => result.user_code,
+      "verification_uri" => result.verification_uri,
+      "expires_in" => result.expires_in,
+      "interval" => result.interval
+    }
+    |> maybe_put("verification_uri_complete", Map.get(result, :verification_uri_complete))
+  end
+
+  def code_body({:error, reason}) when is_atom(reason), do: error_body(reason)
+
+  @doc """
+  RFC 8628 JSON body for a token response.
+
+  Success includes `access_token` and `token_type`. `expires_in` is included
+  when the API key expires, and `scope` when the grant had one.
+  `scope` is the display string from the grant. The API key does not
+  enforce it. The API key id stays on the Elixir result (`:api_key_id`)
+  and is left out of this body. Errors use `error` and `error_description`.
+
+  `:server_error` here means the access token could not be issued. The
+  device code was already issued. `code_body/1` keeps the device-code
+  wording for that same atom.
+  """
+  def token_body({:ok, result}) do
+    %{"access_token" => result.access_token, "token_type" => result.token_type}
+    |> maybe_put("expires_in", result.expires_in)
+    |> maybe_put("scope", result.scope)
+  end
+
+  def token_body({:error, :server_error}) do
+    %{"error" => "server_error", "error_description" => @token_server_error}
+  end
+
+  def token_body({:error, reason}) when is_atom(reason), do: error_body(reason)
+
+  @doc """
+  JSON body for the signed-in approval page.
+
+  `{:ok, view}` from `get_device_authorization/2`,
+  `approve_device_authorization/3`, or `deny_device_authorization/2`
+  uses `status`, `client_id`, `expires_in`, and `interval`. `scope` is
+  included when the device sent one. It is informational. Approving does
+  not limit the API key to that scope. `active_tenant_id` is included
+  when approval stored a tenant. `{:error, atom}` uses `error` and
+  `error_description`.
+  """
+  def approval_body({:ok, view}) do
+    %{
+      "status" => view.status,
+      "client_id" => view.client_id,
+      "expires_in" => view.expires_in,
+      "interval" => view.interval
+    }
+    |> maybe_put("scope", view.scope)
+    |> maybe_put("active_tenant_id", view.active_tenant_id)
+  end
+
+  def approval_body({:error, reason}) when is_atom(reason), do: error_body(reason)
+
+  @doc """
+  RFC 8628 error object for `reason`.
+  """
+  def error_body(reason) when is_atom(reason) do
+    %{"error" => Atom.to_string(reason), "error_description" => error_description(reason)}
+  end
+
+  @doc """
+  Headers that present the issued API key to `AuthKit.Auth.Bearer`.
+
+  Either header is enough. The value is the plaintext key.
+  """
+  def credential_headers(%{access_token: token}) when is_binary(token) do
+    %{"authorization" => "Bearer " <> token, "x-api-key" => token}
+  end
+
+  @doc """
+  Issues a device code and a user code.
+
+  Returns `{:ok, grant}` with `:device_code`, `:user_code`,
+  `:verification_uri`, `:verification_uri_complete` (unless disabled),
+  `:expires_in` (seconds), and `:interval` (seconds). The plaintext codes
+  are only in this return value.
+
+  ## Options
+
+    * `:client_id` — required client identifier, stored for the approval page
+    * `:scope` — optional display string, shown on the approval page and
+      echoed on the token response. Not enforced on the API key. At most
+      255 bytes, so it fits a `varchar(255)` column.
+    * `:user_id` — pre-bind the grant so only that user can approve or deny it
+  """
+  def request_device_authorization(opts \\ [])
+
+  def request_device_authorization(opts) when is_list(opts) do
+    ensure_fields!()
+    _ = delete_expired_device_codes()
+
+    with :ok <- validate_client(Keyword.get(opts, :client_id)),
+         {:ok, scope} <- normalize_scope(Keyword.get(opts, :scope)),
+         {:ok, user_id} <- resolve_prebind(opts),
+         :ok <- validate_key_settings(opts[:client_id]) do
+      issue_codes(opts[:client_id], scope, user_id, @max_attempts)
+    end
+  end
+
+  def request_device_authorization(_opts), do: {:error, :invalid_request}
+
+  @doc """
+  Loads a grant by user code for the signed-in approval page.
+
+  Returns `{:ok, view}` with `:client_id`, `:scope`, `:status`,
+  `:expires_in`, and `:interval`. Does not approve the grant.
+  An unknown code is `:invalid_grant`. An expired code is `:expired_token`
+  and the row is deleted. A code pre-bound to someone else is `:access_denied`.
+  Too many missed codes is `:too_many_attempts`. `scope` on the view is
+  display-only.
+  """
+  def get_device_authorization(user, user_code) do
+    with_user_code(user, user_code, &show_loaded(&1, user))
+  end
+
+  @doc """
+  Binds `user_code` to `user` and marks the grant approved.
+
+  `user_code` is the code the device displayed. Dashes, spaces, and letter
+  case are ignored. Pass `tenant_id:` to scope the API key that a later
+  poll will issue. The user must already belong to that tenant.
+
+  Returns `{:ok, view}`. Unknown codes are `:invalid_grant`. Expired codes
+  are `:expired_token`. A code pre-bound to another user, or already denied,
+  is `:access_denied`. Approving again as the same user returns the view.
+  Too many missed codes is `:too_many_attempts`.
+  """
+  def approve_device_authorization(user, user_code, opts \\ [])
+
+  def approve_device_authorization(user, user_code, opts) when is_list(opts) do
+    ensure_fields!()
+
+    with :ok <- ensure_user(user),
+         {:ok, scope} <- resolve_tenant(user, Keyword.get(opts, :tenant_id)) do
+      with_user_code(user, user_code, &approve_loaded(&1, user, scope))
+    end
+  end
+
+  def approve_device_authorization(_user, _user_code, _opts), do: {:error, :invalid_request}
+
+  @doc """
+  Marks the grant denied.
+
+  A later poll returns `:access_denied` and does not mint a key. The
+  approving user can cancel a grant that is already approved and has not
+  been polled yet. That sets `status` to `"denied"`, so the next poll
+  cannot issue a key. Another user cannot cancel that approval.
+
+  The same user denying twice returns `{:ok, view}`. Another user, when
+  the grant is pre-bound, already denied, or approved by someone else,
+  gets `:access_denied`. Too many missed codes is `:too_many_attempts`.
+  """
+  def deny_device_authorization(user, user_code) do
+    with_user_code(user, user_code, &deny_loaded(&1, user))
+  end
+
+  @doc """
+  Polls `device_code`.
+
+  ## Options
+
+    * `:grant_type` — required, `AuthKit.Device.grant_type/0`
+    * `:client_id` — required, the client id from the code request
+
+  Returns `{:error, :authorization_pending}` while the user has not
+  approved, `{:error, :slow_down}` when a pending grant is polled before
+  `interval` seconds have passed (and the stored interval grows by 5),
+  `{:error, :expired_token}`, `{:error, :access_denied}`, or
+  `{:error, :invalid_grant}`.
+
+  `{:ok, token}` includes `:access_token` (the API key, once),
+  `:token_type` (`"Bearer"`), `:expires_in` (seconds, or nil when the key
+  does not expire), `:scope` (display-only, not enforced on the key), and
+  `:api_key_id`. The device row is deleted in the same transaction as the
+  key insert, so a second poll cannot mint another key. A failure to issue
+  the key deletes the grant in that transaction as well.
+
+  `slow_down` applies while the grant is pending. An approved grant is
+  exchanged on the next poll, including one that arrives inside the interval.
+  """
+  def poll_device_token(device_code, opts \\ [])
+
+  def poll_device_token(device_code, opts) when is_binary(device_code) and is_list(opts) do
+    ensure_fields!()
+
+    with :ok <- validate_grant_type(Keyword.get(opts, :grant_type)),
+         :ok <- validate_poll_client(Keyword.get(opts, :client_id)) do
+      result =
+        case fetch_device(device_code) do
+          nil -> {:error, :invalid_grant}
+          token -> poll_loaded(token, opts[:client_id], DateTime.utc_now(), 0)
+        end
+
+      _ = delete_expired_device_codes()
+      result
+    end
+  end
+
+  def poll_device_token(_device_code, _opts), do: {:error, :invalid_request}
+
+  @doc """
+  Deletes device grants whose `expires_at` is in the past.
+
+  Returns `{:ok, count}`. Request and poll share a 10 second cooldown.
+  Pass `force: true` to ignore it. API keys and sessions are not deleted.
+  A poll of one expired code deletes that row itself, so two polls cannot
+  raise `Ecto.StaleEntryError`.
+  """
+  def delete_expired_device_codes(opts \\ []) when is_list(opts) do
+    ensure_fields!()
+
+    if Keyword.get(opts, :force, false) or sweep_due?() do
+      now = DateTime.utc_now()
+
+      {count, _} =
+        from(t in schema(),
+          where: t.context == ^@context and not is_nil(t.expires_at) and t.expires_at <= ^now
+        )
+        |> Repo.delete_all()
+
+      :persistent_term.put(sweep_key(), System.monotonic_time(:millisecond))
+      {:ok, count}
+    else
+      {:ok, 0}
+    end
+  end
+
+  defp issue_codes(client_id, scope, user_id, attempts) do
+    device_code = new_device_code()
+    canonical = random_chars(user_code_length())
+    user_code = format_user_code(canonical)
+    expires = expires_in()
+    interval = interval()
+    now = DateTime.utc_now()
+
+    attrs = %{
+      token: hash(device_code),
+      user_code: hash(canonical),
+      context: @context,
+      status: "pending",
+      interval: interval,
+      expires_at: DateTime.add(now, expires, :second),
+      user_id: user_id,
+      name: client_id,
+      sent_to: scope,
+      updated_at: now,
+      tenant_scoped: false
+    }
+
+    case insert_grant(attrs) do
+      {:ok, _token} ->
+        {:ok, code_result(device_code, user_code, expires, interval)}
+
+      {:error, :conflict} when attempts > 1 ->
+        issue_codes(client_id, scope, user_id, attempts - 1)
+
+      {:error, :conflict} ->
+        {:error, :server_error}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp insert_grant(attrs) do
+    changeset =
+      schema()
+      |> struct()
+      |> change(attrs)
+      |> unique_constraint(:token, name: :users_tokens_context_token_index)
+      |> unique_constraint(:user_code, name: :users_tokens_user_code_index)
+
+    try do
+      case Repo.insert(changeset) do
+        {:ok, token} ->
+          {:ok, token}
+
+        {:error, changeset} ->
+          if conflict?(changeset), do: {:error, :conflict}, else: {:error, changeset}
+      end
+    rescue
+      Ecto.ConstraintError ->
+        {:error, :conflict}
+
+      exception ->
+        if value_too_long?(exception) do
+          {:error, :invalid_request}
+        else
+          reraise exception, __STACKTRACE__
+        end
+    end
+  end
+
+  # varchar overflow is not an Ecto constraint. PostgreSQL raises
+  # `string_data_right_truncation` (SQLSTATE 22001). MySQL raises
+  # ER_DATA_TOO_LONG (1406). Callers should reject these strings first.
+  defp value_too_long?(%{postgres: %{code: :string_data_right_truncation}}), do: true
+  defp value_too_long?(%{postgres: %{pg_code: "22001"}}), do: true
+  defp value_too_long?(%{mysql: %{code: 1406}}), do: true
+
+  defp value_too_long?(exception) do
+    message = Exception.message(exception)
+
+    String.contains?(message, "value too long") or
+      String.contains?(message, "string_data_right_truncation") or
+      String.contains?(message, "Data too long")
+  end
+
+  defp conflict?(changeset) do
+    Enum.any?(changeset.errors, fn
+      {_field, {_msg, opts}} -> opts[:constraint] == :unique
+      _other -> false
+    end)
+  end
+
+  defp show_loaded(token, user) do
+    now = DateTime.utc_now()
+
+    cond do
+      expired?(token, now) -> expire_row(token)
+      bound_to_other?(token, user) -> {:error, :access_denied}
+      token.status == "denied" -> {:error, :access_denied}
+      true -> {:ok, approval_view(token)}
+    end
+  end
+
+  defp approve_loaded(token, user, scope) do
+    now = DateTime.utc_now()
+
+    cond do
+      expired?(token, now) ->
+        expire_row(token)
+
+      token.status == "approved" and token.user_id == user.id ->
+        {:ok, approval_view(token)}
+
+      token.status == "approved" ->
+        {:error, :access_denied}
+
+      token.status == "denied" ->
+        {:error, :access_denied}
+
+      bound_to_other?(token, user) ->
+        {:error, :access_denied}
+
+      token.status == "pending" ->
+        write_approval(token, user, scope, now)
+
+      true ->
+        {:error, :invalid_grant}
+    end
+  end
+
+  defp write_approval(token, user, scope, now) do
+    tenant_id = scope && scope.tenant_id
+    sets = approval_sets(user, tenant_id, now)
+
+    {count, _} =
+      from(t in schema(),
+        where:
+          t.id == ^token.id and t.context == ^@context and t.status == "pending" and
+            t.expires_at > ^now and (is_nil(t.user_id) or t.user_id == ^user.id)
+      )
+      |> Repo.update_all(set: sets)
+
+    if count == 1 do
+      {:ok, approval_view(approved_token(token, user, tenant_id))}
+    else
+      case refetch(token.id) do
+        nil ->
+          {:error, :expired_token}
+
+        fresh ->
+          if fresh.status == "pending" and not expired?(fresh, DateTime.utc_now()) do
+            {:error, :invalid_grant}
+          else
+            approve_loaded(fresh, user, scope)
+          end
+      end
+    end
+  end
+
+  defp approval_sets(user, nil, now) do
+    [status: "approved", user_id: user.id, updated_at: now, tenant_scoped: false]
+  end
+
+  defp approval_sets(user, tenant_id, now) do
+    [
+      status: "approved",
+      user_id: user.id,
+      updated_at: now,
+      tenant_scoped: true,
+      active_tenant_id: tenant_id
+    ]
+  end
+
+  defp approved_token(token, user, tenant_id) do
+    token = %{token | status: "approved", user_id: user.id, tenant_scoped: not is_nil(tenant_id)}
+
+    if tenant_id && Map.has_key?(token, :active_tenant_id) do
+      %{token | active_tenant_id: tenant_id}
+    else
+      token
+    end
+  end
+
+  defp deny_loaded(token, user) do
+    now = DateTime.utc_now()
+
+    cond do
+      expired?(token, now) ->
+        expire_row(token)
+
+      token.status == "denied" and (is_nil(token.user_id) or token.user_id == user.id) ->
+        {:ok, approval_view(token)}
+
+      token.status == "denied" ->
+        {:error, :access_denied}
+
+      token.status == "approved" and token.user_id == user.id ->
+        cancel_approval(token, user, now)
+
+      token.status == "approved" ->
+        {:error, :access_denied}
+
+      bound_to_other?(token, user) ->
+        {:error, :access_denied}
+
+      token.status == "pending" ->
+        write_denial(token, user, now)
+
+      true ->
+        {:error, :invalid_grant}
+    end
+  end
+
+  # An approved grant that has not been polled yet can still mint a key.
+  # The approving user cancelling it has to stick, or the next poll
+  # issues the credential after the user was told the login is over.
+  defp cancel_approval(token, user, now) do
+    case cancel_once(token, user, now) do
+      :ok ->
+        {:ok, approval_view(%{token | status: "denied"})}
+
+      :stale ->
+        case refetch(token.id) do
+          nil ->
+            {:error, :invalid_grant}
+
+          fresh ->
+            now = DateTime.utc_now()
+
+            cond do
+              expired?(fresh, now) ->
+                expire_row(fresh)
+
+              fresh.status == "approved" and fresh.user_id == user.id ->
+                if cancel_once(fresh, user, now) == :ok do
+                  {:ok, approval_view(%{fresh | status: "denied"})}
+                else
+                  {:error, :invalid_grant}
+                end
+
+              true ->
+                deny_loaded(fresh, user)
+            end
+        end
+    end
+  end
+
+  defp cancel_once(token, user, now) do
+    {count, _} =
+      from(t in schema(),
+        where:
+          t.id == ^token.id and t.context == ^@context and t.status == "approved" and
+            t.user_id == ^user.id and t.expires_at > ^now
+      )
+      |> Repo.update_all(set: [status: "denied", updated_at: now])
+
+    if count == 1, do: :ok, else: :stale
+  end
+
+  defp write_denial(token, user, now) do
+    {count, _} =
+      from(t in schema(),
+        where:
+          t.id == ^token.id and t.context == ^@context and t.status == "pending" and
+            t.expires_at > ^now and (is_nil(t.user_id) or t.user_id == ^user.id)
+      )
+      |> Repo.update_all(set: [status: "denied", user_id: user.id, updated_at: now])
+
+    if count == 1 do
+      {:ok, approval_view(%{token | status: "denied", user_id: user.id})}
+    else
+      case refetch(token.id) do
+        nil ->
+          {:error, :expired_token}
+
+        fresh ->
+          if fresh.status == "pending" and not expired?(fresh, DateTime.utc_now()) do
+            {:error, :invalid_grant}
+          else
+            deny_loaded(fresh, user)
+          end
+      end
+    end
+  end
+
+  defp poll_loaded(token, client_id, now, depth) do
+    cond do
+      depth > 2 ->
+        {:error, :invalid_grant}
+
+      not client_match?(token.name, client_id) ->
+        {:error, :invalid_grant}
+
+      expired?(token, now) ->
+        expire_row(token)
+
+      token.status == "denied" ->
+        {:error, :access_denied}
+
+      token.status == "approved" ->
+        issue_credential(token)
+
+      token.status == "pending" ->
+        poll_pending(token, client_id, now, depth)
+
+      true ->
+        {:error, :invalid_grant}
+    end
+  end
+
+  defp poll_pending(token, client_id, now, depth) do
+    if poll_allowed?(token, now) do
+      case claim_poll(token, now) do
+        {1, _} ->
+          {:error, :authorization_pending}
+
+        {0, _} ->
+          case refetch(token.id) do
+            nil -> {:error, :invalid_grant}
+            fresh -> poll_loaded(fresh, client_id, DateTime.utc_now(), depth + 1)
+          end
+      end
+    else
+      _ = bump_interval(token)
+      {:error, :slow_down}
+    end
+  end
+
+  defp poll_allowed?(%{last_request: nil}, _now), do: true
+
+  defp poll_allowed?(%{last_request: last, interval: interval}, now) do
+    spacing = if is_integer(interval) and interval >= 1, do: interval, else: @default_interval
+    DateTime.compare(now, DateTime.add(last, spacing, :second)) != :lt
+  end
+
+  # One writer wins. The WHERE clause is the lock: a second poll sees the
+  # new last_request and does not take the slot. delete/update use
+  # update_all, never delete!/update!, so a lost race is a count of 0.
+  defp claim_poll(token, now) do
+    query =
+      from t in schema(),
+        where: t.id == ^token.id and t.context == ^@context and t.status == "pending"
+
+    query =
+      case token.last_request do
+        nil ->
+          from t in query, where: is_nil(t.last_request)
+
+        last ->
+          from t in query,
+            where: t.last_request <= ^last and t.interval == ^token.interval
+      end
+
+    Repo.update_all(query, set: [last_request: now, updated_at: now])
+  end
+
+  defp bump_interval(%{interval: interval})
+       when is_integer(interval) and interval >= @max_interval do
+    :ok
+  end
+
+  defp bump_interval(token) do
+    from(t in schema(),
+      where:
+        t.id == ^token.id and t.context == ^@context and t.status == "pending" and
+          t.interval == ^token.interval and t.interval < @max_interval
+    )
+    |> Repo.update_all(inc: [interval: @interval_step], set: [updated_at: DateTime.utc_now()])
+
+    :ok
+  end
+
+  defp issue_credential(token) do
+    if Map.get(token, :tenant_scoped) == true and is_nil(Map.get(token, :active_tenant_id)) do
+      refuse_scoped(token)
+    else
+      case Repo.transaction(fn -> issue_in_txn(token) end) do
+        {:ok, {:issued, api_key}} -> {:ok, token_success(api_key, token)}
+        {:ok, {:terminal, reason}} -> {:error, normalize_issue_error(reason)}
+        {:error, reason} -> {:error, normalize_issue_error(reason)}
+      end
+    end
+  end
+
+  # The delete re-checks `expires_at` so a grant that crosses expiry inside
+  # the gap after `poll_loaded/4` cannot be redeemed. On a non-retryable
+  # issue failure the delete is committed (`{:terminal, _}`) instead of
+  # rolled back, so a later poll cannot mint a key. RFC 8628 §3.5.
+  defp issue_in_txn(token) do
+    now = DateTime.utc_now()
+
+    case claim_approved(token, now) do
+      :claimed ->
+        issue_claimed(token)
+
+      :expired ->
+        _ = delete_grant(token)
+        {:terminal, :expired_token}
+
+      :denied ->
+        Repo.rollback(:access_denied)
+
+      :missing ->
+        Repo.rollback(:invalid_grant)
+    end
+  end
+
+  defp claim_approved(token, now) do
+    {count, _} =
+      from(t in schema(),
+        where:
+          t.id == ^token.id and t.context == ^@context and t.status == "approved" and
+            not is_nil(t.expires_at) and t.expires_at > ^now
+      )
+      |> Repo.delete_all()
+
+    cond do
+      count == 1 ->
+        :claimed
+
+      true ->
+        case refetch(token.id) do
+          nil ->
+            :missing
+
+          fresh ->
+            cond do
+              expired?(fresh, now) -> :expired
+              fresh.status == "denied" -> :denied
+              true -> :missing
+            end
+        end
+    end
+  end
+
+  defp issue_claimed(token) do
+    opts = credential_opts(token)
+
+    with :ok <- ApiKey.validate_create_opts(opts),
+         %{} = user <- fetch_issuing_user(token.user_id) do
+      case ApiKey.create_api_key(user, opts) do
+        {:ok, api_key} -> {:issued, api_key}
+        {:error, reason} -> {:terminal, reason}
+      end
+    else
+      {:error, _reason} -> {:terminal, :server_error}
+      nil -> {:terminal, :access_denied}
+    end
+  end
+
+  defp fetch_issuing_user(nil), do: nil
+  defp fetch_issuing_user(id), do: Repo.get(Config.user_schema(), id)
+
+  defp delete_grant(token) do
+    from(t in schema(), where: t.id == ^token.id and t.context == ^@context)
+    |> Repo.delete_all()
+  end
+
+  defp refuse_scoped(token) do
+    {count, _} =
+      from(t in schema(),
+        where: t.id == ^token.id and t.status == "approved" and t.context == ^@context
+      )
+      |> Repo.delete_all()
+
+    if count == 1, do: {:error, :access_denied}, else: {:error, :invalid_grant}
+  end
+
+  defp credential_opts(token) do
+    []
+    |> Keyword.put(:name, key_name(token))
+    |> maybe_opt(:prefix, conf(:api_key_prefix, :unset))
+    |> maybe_opt(:expires_in, conf(:api_key_expires_in, :unset))
+    |> maybe_tenant(token)
+  end
+
+  defp key_name(token), do: configured_key_name(token.name)
+
+  defp configured_key_name(client_id) do
+    case conf(:api_key_name, nil) do
+      name when is_binary(name) and name != "" -> name
+      _other -> fallback_name(client_id)
+    end
+  end
+
+  defp fallback_name(client_id) when is_binary(client_id) do
+    max = api_name_max()
+    if String.length(client_id) in 1..max, do: client_id, else: "cli"
+  end
+
+  defp fallback_name(_client_id), do: "cli"
+
+  defp api_name_max do
+    :auth_kit
+    |> Application.get_env(:api_key, [])
+    |> Keyword.get(:maximum_name_length, 32)
+  end
+
+  defp maybe_opt(opts, _key, :unset), do: opts
+  defp maybe_opt(opts, _key, nil), do: opts
+  defp maybe_opt(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp maybe_tenant(opts, token) do
+    case Map.get(token, :active_tenant_id) do
+      nil -> opts
+      id -> Keyword.put(opts, :tenant_id, id)
+    end
+  end
+
+  defp token_success(api_key, device) do
+    %{
+      access_token: api_key.key,
+      token_type: "Bearer",
+      expires_in: remaining_seconds(api_key.expires_at),
+      scope: device.sent_to,
+      api_key_id: api_key.id
+    }
+  end
+
+  defp normalize_issue_error(reason) when reason in [:not_a_member, :not_found, :invalid_user],
+    do: :access_denied
+
+  defp normalize_issue_error(reason)
+       when reason in [
+              :invalid_name_length,
+              :invalid_prefix,
+              :invalid_prefix_length,
+              :expires_in_too_small,
+              :expires_in_too_large,
+              :expiration_disabled,
+              :invalid_expires_in,
+              :name_required
+            ],
+       do: :server_error
+
+  defp normalize_issue_error(reason) when is_atom(reason), do: reason
+  defp normalize_issue_error(_reason), do: :server_error
+
+  defp expire_row(token) do
+    from(t in schema(), where: t.id == ^token.id and t.context == ^@context)
+    |> Repo.delete_all()
+
+    {:error, :expired_token}
+  end
+
+  defp expired?(%{expires_at: %DateTime{} = at}, now), do: DateTime.compare(now, at) != :lt
+  defp expired?(_token, _now), do: true
+
+  defp remaining_seconds(nil), do: nil
+
+  defp remaining_seconds(%DateTime{} = at) do
+    max(DateTime.diff(at, DateTime.utc_now(), :second), 0)
+  end
+
+  defp approval_view(token) do
+    %{
+      status: token.status,
+      client_id: token.name,
+      scope: token.sent_to,
+      expires_in: remaining_seconds(token.expires_at),
+      interval: token.interval,
+      user_id: token.user_id,
+      active_tenant_id: Map.get(token, :active_tenant_id)
+    }
+  end
+
+  defp bound_to_other?(%{user_id: nil}, _user), do: false
+  defp bound_to_other?(%{user_id: id}, %{id: id}), do: false
+  defp bound_to_other?(%{user_id: _id}, _user), do: true
+
+  defp fetch_device(plaintext) when plaintext == "", do: nil
+
+  defp fetch_device(plaintext) do
+    hashed = hash(plaintext)
+
+    token =
+      Repo.one(from t in schema(), where: t.token == ^hashed and t.context == ^@context)
+
+    confirm_hash(token, :token, hashed)
+  end
+
+  defp fetch_user_code(canonical) do
+    hashed = hash(canonical)
+
+    token =
+      Repo.one(from t in schema(), where: t.user_code == ^hashed and t.context == ^@context)
+
+    confirm_hash(token, :user_code, hashed)
+  end
+
+  defp confirm_hash(nil, _field, hashed) do
+    _ = secure_equal?(hashed, @dummy_hash)
+    nil
+  end
+
+  defp confirm_hash(token, field, hashed) do
+    stored = Map.get(token, field)
+    if is_binary(stored) and secure_equal?(stored, hashed), do: token, else: nil
+  end
+
+  defp refetch(id), do: Repo.get(schema(), id)
+
+  defp code_result(device_code, user_code, expires, interval) do
+    uri = verification_uri()
+
+    %{
+      device_code: device_code,
+      user_code: user_code,
+      verification_uri: uri,
+      expires_in: expires,
+      interval: interval
+    }
+    |> maybe_complete(uri, user_code)
+  end
+
+  defp maybe_complete(result, uri, user_code) do
+    if conf(:verification_uri_complete, true) do
+      Map.put(result, :verification_uri_complete, complete_uri(uri, user_code))
+    else
+      result
+    end
+  end
+
+  # `user_code` is always a query parameter. Appending `?` or `&` onto a
+  # URI that already contains `#` would hide the code in the fragment.
+  defp complete_uri(uri, user_code) do
+    parsed = URI.parse(uri)
+    encoded = URI.encode_www_form(user_code)
+
+    query =
+      case parsed.query do
+        nil -> "user_code=" <> encoded
+        "" -> "user_code=" <> encoded
+        existing -> existing <> "&user_code=" <> encoded
+      end
+
+    URI.to_string(%{parsed | query: query})
+  end
+
+  defp validate_grant_type(@grant_type), do: :ok
+  defp validate_grant_type(nil), do: {:error, :invalid_request}
+  defp validate_grant_type(_grant_type), do: {:error, :unsupported_grant_type}
+
+  defp validate_poll_client(client_id) do
+    cond do
+      not valid_client_id?(client_id) -> {:error, :invalid_request}
+      not client_allowed?(client_id) -> {:error, :invalid_client}
+      true -> :ok
+    end
+  end
+
+  defp validate_client(client_id) do
+    cond do
+      not valid_client_id?(client_id) -> {:error, :invalid_request}
+      not client_allowed?(client_id) -> {:error, :invalid_client}
+      true -> :ok
+    end
+  end
+
+  defp valid_client_id?(id) when is_binary(id) do
+    String.valid?(id) and byte_size(id) in 1..@max_varchar and
+      String.length(id) in 1..@max_client_id and String.printable?(id) and
+      not Regex.match?(~r/\s/, id)
+  end
+
+  defp valid_client_id?(_id), do: false
+
+  defp client_allowed?(client_id) do
+    case conf(:allowed_clients, nil) do
+      nil -> true
+      fun when is_function(fun, 1) -> fun.(client_id) == true
+      list when is_list(list) -> client_id in list
+      _other -> false
+    end
+  end
+
+  defp client_match?(stored, given) when is_binary(stored) and is_binary(given) do
+    if byte_size(stored) == byte_size(given) do
+      secure_equal?(stored, given)
+    else
+      false
+    end
+  end
+
+  defp client_match?(_stored, _given), do: false
+
+  defp with_user_code(user, user_code, fun) do
+    ensure_fields!()
+
+    with :ok <- ensure_user(user),
+         {:ok, canonical} <- normalize_user_code(user_code),
+         :ok <- reserve_attempt(user) do
+      case fetch_user_code(canonical) do
+        token when not is_nil(token) ->
+          release_attempt(user)
+          fun.(token)
+
+        _missing ->
+          {:error, :invalid_grant}
+      end
+    else
+      :locked -> {:error, :too_many_attempts}
+      :error -> {:error, :invalid_grant}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # One `device_attempt` row per authenticated user holds that user's
+  # failed-guess count in `interval`. The row is keyed by the user id
+  # (`user_id`, and a digest of that id in `token`), so one account cannot
+  # spend another account's budget. The UPDATE ... WHERE interval < max is
+  # the lock: concurrent guesses from that user cannot all pass. A lookup
+  # that finds a grant releases the slot, so only misses spend the budget.
+  # The window is `expires_in`, the same lifetime as a code.
+  # `max_user_code_attempts/0` is half of the RFC 8628 §5.1 budget because
+  # a code can straddle two windows. Password change, password reset, and
+  # email confirmation do not delete this row. `reset_attempt_window/2`
+  # is the only reset.
+  defp reserve_attempt(user), do: reserve_attempt(user, 2)
+
+  defp reserve_attempt(user, retries) do
+    now = DateTime.utc_now()
+
+    with :ok <- ensure_attempt_counter(user, now) do
+      cond do
+        take_attempt_slot(user, now) -> :ok
+        reset_attempt_window(user, now) -> :ok
+        retries > 0 -> reserve_attempt(user, retries - 1)
+        true -> :locked
+      end
+    end
+  end
+
+  defp ensure_attempt_counter(user, now) do
+    token = attempt_token(user.id)
+
+    exists? =
+      Repo.exists?(
+        from t in schema(),
+          where: t.context == ^@attempt_context and t.token == ^token
+      )
+
+    if exists? do
+      :ok
+    else
+      attrs = %{
+        token: token,
+        context: @attempt_context,
+        status: "open",
+        interval: 0,
+        user_id: user.id,
+        expires_at: DateTime.add(now, attempt_window(), :second),
+        tenant_scoped: false,
+        updated_at: now
+      }
+
+      case insert_grant(attrs) do
+        {:ok, _token} -> :ok
+        {:error, :conflict} -> :ok
+        {:error, _reason} -> {:error, :server_error}
+      end
+    end
+  end
+
+  defp take_attempt_slot(user, now) do
+    max = max_user_code_attempts()
+    token = attempt_token(user.id)
+
+    {count, _} =
+      from(t in schema(),
+        where:
+          t.context == ^@attempt_context and t.token == ^token and t.user_id == ^user.id and
+            t.interval < ^max and t.expires_at > ^now
+      )
+      |> Repo.update_all(inc: [interval: 1], set: [updated_at: now])
+
+    count == 1
+  end
+
+  defp reset_attempt_window(user, now) do
+    token = attempt_token(user.id)
+    window_end = DateTime.add(now, attempt_window(), :second)
+
+    {count, _} =
+      from(t in schema(),
+        where:
+          t.context == ^@attempt_context and t.token == ^token and t.user_id == ^user.id and
+            not is_nil(t.expires_at) and t.expires_at <= ^now
+      )
+      |> Repo.update_all(set: [interval: 1, expires_at: window_end, updated_at: now])
+
+    count == 1
+  end
+
+  defp release_attempt(user) do
+    now = DateTime.utc_now()
+    token = attempt_token(user.id)
+
+    from(t in schema(),
+      where:
+        t.context == ^@attempt_context and t.token == ^token and t.user_id == ^user.id and
+          t.interval > 0 and t.expires_at > ^now
+    )
+    |> Repo.update_all(inc: [interval: -1], set: [updated_at: now])
+
+    :ok
+  end
+
+  defp attempt_token(user_id), do: hash(attempt_material(user_id))
+
+  defp attempt_material(user_id) when is_integer(user_id) do
+    "auth-kit-device-user-code-attempts:i:" <> Integer.to_string(user_id)
+  end
+
+  defp attempt_material(user_id) when is_binary(user_id) do
+    "auth-kit-device-user-code-attempts:b:" <> user_id
+  end
+
+  defp attempt_material(user_id) do
+    "auth-kit-device-user-code-attempts:t:" <> :erlang.term_to_binary(user_id)
+  end
+
+  defp attempt_window, do: expires_in()
+
+  @doc """
+  Failed user-code guesses allowed in one attempt window.
+
+  The window is `expires_in` seconds, and the budget belongs to one
+  authenticated user. The user code alphabet has 32 symbols, 5 bits each.
+  RFC 8628 §5.1 keeps the chance that one user guesses a code during its
+  life near `2^-32`, a budget of `2^(entropy - 32)` guesses. A code can
+  overlap two windows, so each window allows half of that.
+
+  Length 7 is 35 bits: 4 failures in one window and 8 across a boundary,
+  which is `2^-32`. The default length 8 is 40 bits: 128 failures per
+  window and 256 across a boundary. Lengths below 7 miss that bar and are
+  not used. Password change, password reset, and email confirmation do
+  not clear the counter, so they do not open another window.
+  """
+  def max_user_code_attempts do
+    exponent = user_code_length() * 5 - 33
+
+    cond do
+      exponent < 0 -> 1
+      exponent > @max_attempt_exponent -> trunc(:math.pow(2, @max_attempt_exponent))
+      true -> trunc(:math.pow(2, exponent))
+    end
+  end
+
+  defp validate_key_settings(client_id) do
+    case ApiKey.validate_create_opts(key_settings_opts(client_id)) do
+      :ok -> :ok
+      {:error, _reason} -> {:error, :server_error}
+    end
+  end
+
+  defp key_settings_opts(client_id) do
+    []
+    |> Keyword.put(:name, configured_key_name(client_id))
+    |> maybe_opt(:prefix, conf(:api_key_prefix, :unset))
+    |> maybe_opt(:expires_in, conf(:api_key_expires_in, :unset))
+  end
+
+  defp normalize_scope(nil), do: {:ok, nil}
+  defp normalize_scope(""), do: {:ok, nil}
+
+  defp normalize_scope(scope) when is_binary(scope) do
+    if String.valid?(scope) do
+      scope = String.trim(scope)
+
+      cond do
+        scope == "" -> {:ok, nil}
+        byte_size(scope) > @max_varchar -> {:error, :invalid_request}
+        not String.printable?(scope) -> {:error, :invalid_request}
+        true -> {:ok, scope}
+      end
+    else
+      {:error, :invalid_request}
+    end
+  end
+
+  defp normalize_scope(_scope), do: {:error, :invalid_request}
+
+  defp resolve_prebind(opts) do
+    case Keyword.get(opts, :user_id) do
+      nil ->
+        {:ok, nil}
+
+      id ->
+        with {:ok, id} <- cast_id(Config.user_schema(), id),
+             %{} = user <- Repo.get(Config.user_schema(), id) do
+          {:ok, user.id}
+        else
+          _other -> {:error, :invalid_user}
+        end
+    end
+  end
+
+  defp resolve_tenant(_user, nil), do: {:ok, nil}
+
+  defp resolve_tenant(user, tenant_id) do
+    ensure_tenant_field!()
+
+    with {:ok, tenant} <- fetch_tenant(tenant_id),
+         {:ok, _member} <- fetch_member(user, tenant.id) do
+      {:ok, %{tenant_id: tenant.id}}
+    end
+  end
+
+  defp fetch_tenant(id) do
+    with {:ok, id} <- cast_id(Config.tenant_schema(), id) do
+      case Repo.get(Config.tenant_schema(), id) do
+        nil -> {:error, :not_found}
+        tenant -> {:ok, tenant}
+      end
+    else
+      :error -> {:error, :not_found}
+    end
+  rescue
+    Ecto.Query.CastError -> {:error, :not_found}
+  end
+
+  defp fetch_member(user, tenant_id) do
+    case Repo.get_by(Config.tenant_member_schema(), user_id: user.id, tenant_id: tenant_id) do
+      nil -> {:error, :not_a_member}
+      member -> {:ok, member}
+    end
+  end
+
+  defp ensure_tenant_field! do
+    if :active_tenant_id in schema().__schema__(:fields) do
+      :ok
+    else
+      raise ArgumentError, """
+      Scoped device approval needs auth_kit_active_tenant_field/0 on the user token schema.
+      """
+    end
+  end
+
+  defp ensure_user(%{id: id} = user) when not is_nil(id) do
+    if is_struct(user, Config.user_schema()) and
+         match?({:ok, _}, cast_id(Config.user_schema(), id)) do
+      :ok
+    else
+      {:error, :invalid_user}
+    end
+  end
+
+  defp ensure_user(_user), do: {:error, :invalid_user}
+
+  defp cast_id(schema, id), do: Ecto.Type.cast(schema.__schema__(:type, :id), id)
+
+  defp new_device_code do
+    Base.url_encode64(:crypto.strong_rand_bytes(@device_bytes), padding: false)
+  end
+
+  defp format_user_code(canonical) do
+    canonical
+    |> String.graphemes()
+    |> Enum.chunk_every(4)
+    |> Enum.map_join("-", &Enum.join/1)
+  end
+
+  defp normalize_user_code(code) when is_binary(code) do
+    allowed = MapSet.new(alphabet_chars())
+
+    normalized =
+      code
+      |> String.upcase()
+      |> String.graphemes()
+      |> Enum.filter(&MapSet.member?(allowed, &1))
+      |> IO.iodata_to_binary()
+
+    if String.length(normalized) in 4..32, do: {:ok, normalized}, else: :error
+  end
+
+  defp normalize_user_code(_code), do: :error
+
+  defp random_chars(count), do: random_chars(count, [])
+
+  defp random_chars(0, acc), do: acc |> Enum.reverse() |> IO.iodata_to_binary()
+
+  defp random_chars(count, acc) do
+    # 32 symbols divide 256, so the low bits are unbiased.
+    <<byte>> = :crypto.strong_rand_bytes(1)
+    random_chars(count - 1, [Enum.at(alphabet_chars(), rem(byte, 32)) | acc])
+  end
+
+  defp alphabet_chars, do: String.graphemes(@alphabet)
+
+  defp hash(value), do: :crypto.hash(:sha256, value)
+
+  defp secure_equal?(left, right), do: Plug.Crypto.secure_compare(left, right)
+
+  defp expires_in do
+    case conf(:expires_in, @default_expires_in) do
+      seconds when is_integer(seconds) and seconds > 0 -> seconds
+      _other -> @default_expires_in
+    end
+  end
+
+  defp interval do
+    case conf(:interval, @default_interval) do
+      seconds when is_integer(seconds) and seconds >= 1 -> seconds
+      _other -> @default_interval
+    end
+  end
+
+  # Lengths below 7 miss the 2^-32 bar this module advertises. Length 7
+  # meets it. Refuse a shorter setting by using the default of 8.
+  defp user_code_length do
+    case conf(:user_code_length, @default_user_code_length) do
+      length
+      when is_integer(length) and
+             length in @min_user_code_length..@max_user_code_length ->
+        length
+
+      _other ->
+        @default_user_code_length
+    end
+  end
+
+  defp verification_uri do
+    case conf(:verification_uri, "/device") do
+      uri when is_binary(uri) and uri != "" -> uri
+      _other -> "/device"
+    end
+  end
+
+  defp conf(key, default) do
+    :auth_kit
+    |> Application.get_env(:device_authorization, [])
+    |> Keyword.get(key, default)
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp sweep_due? do
+    now = System.monotonic_time(:millisecond)
+
+    case :persistent_term.get(sweep_key(), nil) do
+      nil -> true
+      last -> now - last >= @sweep_cooldown_ms
+    end
+  end
+
+  defp sweep_key, do: {__MODULE__, :last_expired_sweep}
+
+  defp ensure_fields! do
+    missing = (@device_fields ++ @reused_fields) -- schema().__schema__(:fields)
+
+    if missing != [] do
+      raise ArgumentError, """
+      Device authorization needs auth_kit_device_fields/0 and auth_kit_api_key_fields/0
+      on the user token schema.
+      Missing fields: #{inspect(missing)}
+
+      Add the columns in docs/device_flow.md, then:
+
+          schema "users_tokens" do
+            auth_kit_user_token_fields()
+            auth_kit_api_key_fields()
+            auth_kit_device_fields()
+          end
+      """
+    end
+  end
+
+  defp schema, do: Config.user_token_schema()
+end

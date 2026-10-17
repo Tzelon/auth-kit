@@ -80,13 +80,15 @@ end
 Password sign-up accepts `send_confirm_email: fn token -> ... end`.
 `AuthKit.Auth.SignUp.confirm_email/2` checks that `"confirm"` token and calls
 `AuthKit.Auth.confirm_user_email/1`. On an account that was not yet confirmed
-this removes the password and every token, then starts a new session.
+this removes the password and every credential token, then starts a new session.
+The device-authorization attempt counter is left in place.
 
 `AuthKit.Auth.SignIn.request_password_reset/3` accepts
 `send_reset_password: fn token -> ... end`. `reset_password/2` stores the new
-password, expires every token, and confirms the email. `change_password/2`
-checks the current password, updates the credential, and expires every token
-except the session making the request.
+password, expires every credential token, and confirms the email. `change_password/2`
+checks the current password, updates the credential, and expires every credential
+token except the session making the request. Neither clears the device-authorization
+attempt counter.
 
 ## Tenants
 
@@ -123,4 +125,18 @@ A key owned by the tenant, per-key permissions, and request quotas are
 proposed in
 `docs/contributing/proposals/001-api-key-ownership-and-limits.md`.
 Passing those options returns `{:error, {:not_supported, field}}`.
+
+## Device authorization
+
+CLI login uses the OAuth 2.0 Device Authorization Grant (RFC 8628).
+`AuthKit.Device.request_device_authorization/1` returns a `device_code`,
+a short `user_code`, a `verification_uri`, and the poll `interval`.
+A signed-in user approves that code with `approve_device_authorization/3`.
+`poll_device_token/2` then returns an API key once, in `access_token`.
+The CLI stores that key and sends it to `plug AuthKit.Auth.Bearer`.
+
+Pending polls return `:authorization_pending`. Polling faster than
+`interval` returns `:slow_down`. Denial is `:access_denied`. An expired
+code is `:expired_token`. See `docs/device_flow.md` for the endpoints a
+host mounts and the config options.
 

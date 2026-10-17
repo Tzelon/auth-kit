@@ -38,7 +38,8 @@ defmodule AuthKit.UserToken do
         only: [
           auth_kit_user_token_fields: 0,
           auth_kit_active_tenant_field: 0,
-          auth_kit_api_key_fields: 0
+          auth_kit_api_key_fields: 0,
+          auth_kit_device_fields: 0
         ]
     end
   end
@@ -112,6 +113,40 @@ defmodule AuthKit.UserToken do
       field :tenant_scoped, :boolean, default: false
       field :updated_at, :utc_datetime_usec
       unquote(member_field)
+    end
+  end
+
+  @doc """
+  Adds the columns a device authorization grant stores beside the hashed codes.
+
+  Call this inside the user token schema when the app uses the device flow.
+  The host migrates the columns. Schemas that skip this macro stay as they are.
+  Device authorization also uses `auth_kit_api_key_fields/0`, because a
+  successful poll mints an API key and the grant reuses `name`,
+  `last_request`, `updated_at`, and `tenant_scoped` from that macro.
+
+      schema "users_tokens" do
+        auth_kit_user_token_fields()
+        auth_kit_active_tenant_field()
+        auth_kit_api_key_fields()
+        auth_kit_device_fields()
+      end
+
+  One row with context `"device"` holds the grant. `token` is the SHA-256
+  digest of the device code. `user_code` is the SHA-256 digest of the
+  canonical user code. `status` is `"pending"`, `"approved"`, or `"denied"`.
+  `interval` is the minimum seconds between polls and grows after
+  `slow_down`. `user_id` links the approving user and stays null until then,
+  unless the code was pre-bound. `active_tenant_id` links the optional
+  tenant chosen at approval. `name` stores the client id. `sent_to` stores
+  the optional scope. That string is display-only and is not enforced on
+  the API key a poll mints. `last_request` is the last accepted poll.
+  """
+  defmacro auth_kit_device_fields do
+    quote do
+      field :user_code, :binary
+      field :status, :string
+      field :interval, :integer
     end
   end
 

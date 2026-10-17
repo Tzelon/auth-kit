@@ -21,4 +21,5 @@ defmodule AuthKit.Repo do
   def delete_all(queryable, opts \\ []), do: repo().delete_all(queryable, opts)
   def update_all(queryable, updates, opts \\ []), do: repo().update_all(queryable, updates, opts)
   def transaction(multi, opts \\ []), do: repo().transaction(multi, opts)
+  def rollback(value), do: repo().rollback(value)
 end

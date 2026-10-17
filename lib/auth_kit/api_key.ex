@@ -144,6 +144,16 @@ defmodule AuthKit.ApiKey do
     end
   end
 
+  @doc false
+  def validate_create_opts(opts) when is_list(opts) do
+    with :ok <- reject_unsupported(opts),
+         :ok <- validate_name(Keyword.get(opts, :name)),
+         :ok <- validate_prefix(resolved_prefix(opts)),
+         :ok <- validate_expires_in(Keyword.get(opts, :expires_in)) do
+      :ok
+    end
+  end
+
   @doc """
   Checks `key`.
 
