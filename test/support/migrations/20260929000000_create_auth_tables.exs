@@ -49,13 +49,11 @@ defmodule AuthKit.Test.Repo.Migrations.CreateAuthTables do
       # API keys (context "api"). Host apps add the same columns; see docs/api_keys.md.
       add(:name, :string)
       add(:prefix, :string)
-      add(:start, :string)
-      add(:config_id, :string)
       add(:enabled, :boolean, default: true)
       add(:last_request, :utc_datetime_usec)
-      add(:metadata, :map)
-      add(:permissions, :map)
-      add(:remaining, :integer)
+      # True only for a key created with a tenant. Stays true after ON DELETE
+      # SET NULL clears active_tenant_id, so the key is not treated as unscoped.
+      add(:tenant_scoped, :boolean, null: false, default: false)
       add(:updated_at, :utc_datetime_usec)
 
       timestamps(type: :utc_datetime, updated_at: false)
@@ -106,5 +104,26 @@ defmodule AuthKit.Test.Repo.Migrations.CreateAuthTables do
     alter table(:users_tokens) do
       add(:active_tenant_id, references(:tenants, type: :binary_id, on_delete: :nilify_all))
     end
+
+    # Integer primary key, used to prove revoke/get/update accept the schema's
+    # real id type. Host apps do not need this table.
+    create table(:integer_users_tokens) do
+      add(:token, :binary, null: false)
+      add(:context, :string, null: false)
+      add(:sent_to, :string)
+      add(:confirmed_at, :utc_datetime_usec)
+      add(:expires_at, :utc_datetime_usec)
+      add(:user_id, references(:users, type: :binary_id, on_delete: :delete_all))
+      add(:name, :string)
+      add(:prefix, :string)
+      add(:enabled, :boolean, default: true)
+      add(:last_request, :utc_datetime_usec)
+      add(:tenant_scoped, :boolean, null: false, default: false)
+      add(:updated_at, :utc_datetime_usec)
+
+      timestamps(type: :utc_datetime, updated_at: false)
+    end
+
+    create(unique_index(:integer_users_tokens, [:context, :token]))
   end
 end

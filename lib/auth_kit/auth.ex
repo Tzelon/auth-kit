@@ -166,7 +166,7 @@ defmodule AuthKit.Auth do
   def get_api_key(user, id), do: AuthKit.ApiKey.get_api_key(user, id)
 
   @doc """
-  Updates API key metadata. See `AuthKit.ApiKey.update_api_key/3`.
+  Updates an API key's name or enabled flag. See `AuthKit.ApiKey.update_api_key/3`.
   """
   def update_api_key(user, id, opts \\ []), do: AuthKit.ApiKey.update_api_key(user, id, opts)
 

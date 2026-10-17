@@ -85,21 +85,21 @@ defmodule AuthKit.UserToken do
       end
 
   `token` is the SHA-256 digest of the plaintext key, the same hash email
-  tokens use. `prefix` and `start` are safe to display. `expires_at` from
-  `auth_kit_user_token_fields/0` stays null when the key does not expire.
-  `last_request` is the last successful verification (Better Auth's `lastRequest`).
+  tokens use. `prefix` is the configured prefix and is safe to display. It
+  does not include generated key bytes. `tenant_scoped` is true when the
+  key was created for a tenant. `active_tenant_id` is cleared when that
+  tenant row is deleted; a scoped key with a null tenant does not
+  authenticate. `expires_at` from `auth_kit_user_token_fields/0` stays null
+  when the key does not expire. `last_request` is the last successful
+  verification (Better Auth's `lastRequest`).
   """
   defmacro auth_kit_api_key_fields do
     quote do
       field :name, :string
       field :prefix, :string
-      field :start, :string
-      field :config_id, :string
       field :enabled, :boolean, default: true
       field :last_request, :utc_datetime_usec
-      field :metadata, :map
-      field :permissions, :map
-      field :remaining, :integer
+      field :tenant_scoped, :boolean, default: false
       field :updated_at, :utc_datetime_usec
     end
   end

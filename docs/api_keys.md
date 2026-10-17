@@ -19,13 +19,14 @@ The plaintext is returned once from `create_api_key/2`. The row stores `SHA-256`
 | `organizationId` | `organization_id` and `active_tenant_id` (optional scope) |
 | `lastRequest` | `last_request` |
 | `expiresAt` | `expires_at` (`nil` does not expire) |
-| `start` | `start` (first characters, safe to display) |
-| `prefix` | `prefix` |
+| `prefix` | `prefix` (configured prefix only, safe to display) |
 | `x-api-key` | `x-api-key`, and `Authorization: Bearer` |
 
 `revoke_api_key/2` is `delete_api_key/2`. `AuthKit.Auth` defines the same functions.
 
 Better Auth reads the user from the session on HTTP calls. These functions take the user as the first argument.
+
+`get_api_key/2`, `update_api_key/3`, `delete_api_key/2`, and `revoke_api_key/2` cast `id` with the token schema's primary key type. Ecto's default primary key is an integer, and `revoke_api_key(user, key.id)` works for that integer. A host that uses UUIDs sets `@primary_key {:id, :binary_id, autogenerate: true}` (and `@foreign_key_type :binary_id`) and passes the UUID string. User ids are cast with the user schema's primary key type the same way.
 
 ## Schema
 
@@ -44,6 +45,8 @@ defmodule MyApp.UserToken do
 end
 ```
 
+That sample uses Ecto's default integer primary key. The id you pass to get, update, delete, and revoke is that integer.
+
 ### Migration
 
 Add these columns to the user token table (the test app uses `users_tokens`):
@@ -52,18 +55,16 @@ Add these columns to the user token table (the test app uses `users_tokens`):
 alter table(:users_tokens) do
   add :name, :string
   add :prefix, :string
-  add :start, :string
-  add :config_id, :string
   add :enabled, :boolean, default: true
   add :last_request, :utc_datetime_usec
-  add :metadata, :map
-  add :permissions, :map
-  add :remaining, :integer
+  add :tenant_scoped, :boolean, null: false, default: false
   add :updated_at, :utc_datetime_usec
 end
 ```
 
-`name` is the label. `prefix` is the configured prefix (`"pup_"`). `start` is the first characters of the full key, including the prefix (6 by default), so a list can show which key is which. `config_id` defaults to `"default"`. `last_request` is the last successful verification. `remaining` is a use cap; `nil` means no cap. `expires_at` is already on the table and stays `nil` when the key does not expire. `metadata` and `permissions` are maps.
+`name` is the label. `prefix` is the configured prefix (`"pup_"`), capped at 32 characters. It is the only display fragment stored, and it never includes the generated key. `last_request` is the last successful verification. `expires_at` is already on the table and stays `nil` when the key does not expire. `updated_at` changes when the key is updated or successfully verified.
+
+`tenant_scoped` is true when the key was created for a tenant. `active_tenant_id` uses `ON DELETE SET NULL` so a session row stays valid after the tenant is deleted. A scoped API key whose `active_tenant_id` becomes `nil` does not authenticate. An unscoped key has `tenant_scoped` false and a null `active_tenant_id`, and stays valid.
 
 The lookup uses the existing unique index on `(context, token)`.
 
@@ -75,7 +76,6 @@ The lookup uses the existing unique index on `(context, token)`.
     name: "ci",
     prefix: "pup_",
     expires_in: 60 * 60 * 24 * 7,
-    permissions: %{projects: ["read"]},
     tenant_id: tenant.id
   )
 
@@ -86,29 +86,28 @@ api_key.key
 
 `expires_in` is seconds. Omit it, or pass `nil`, to use `:default_expires_in` from config. When that is also unset, the key does not expire. Custom lifetimes must sit between 1 and 365 days unless `key_expiration` changes `min_expires_in` and `max_expires_in`.
 
-`tenant_id` and `organization_id` are the same option. The user must already be a member. The key's `reference_id` stays the user. The tenant is the scope (`active_tenant_id`), which is this library's reading of Better Auth's organization id on a user-owned key.
+`tenant_id` and `organization_id` are the same option. The user must already be a member. The key's `reference_id` stays the user. The tenant is the scope (`active_tenant_id`), which is this library's reading of Better Auth's organization id on a user-owned key. Creating with a tenant sets `tenant_scoped` to true.
 
-`metadata` is rejected until config enables it, matching Better Auth's `enableMetadata: false` default.
-
-`:refill_amount`, `:refill_interval`, `:rate_limit_enabled`, `:rate_limit_max`, and `:rate_limit_time_window` return `{:error, {:not_supported, field}}`.
+`:permissions`, `:metadata`, `:remaining`, `:config_id`, `:refill_amount`, `:refill_interval`, `:rate_limit_enabled`, `:rate_limit_max`, and `:rate_limit_time_window` return `{:error, {:not_supported, field}}`.
 
 ## Verify, list, revoke
 
 ```elixir
-%{valid: true, error: nil, key: metadata} =
-  AuthKit.ApiKey.verify_api_key(plaintext, permissions: %{projects: ["read"]})
+%{valid: true, error: nil, key: metadata} = AuthKit.ApiKey.verify_api_key(plaintext)
 
 {:ok, %{api_keys: keys, total: total}} =
   AuthKit.ApiKey.list_api_keys(user, limit: 20, sort_by: "createdAt", sort_direction: "desc")
 
+{:ok, page} = AuthKit.ApiKey.list_api_keys(user, offset: 20)
+
 {:ok, %{success: true}} = AuthKit.ApiKey.revoke_api_key(user, metadata.id)
 ```
 
-`verify_api_key/2` returns the Better Auth result map. Invalid keys are `valid: false` with `error.code` of `"INVALID_API_KEY"`, `"KEY_DISABLED"`, `"KEY_EXPIRED"`, `"KEY_NOT_FOUND"` (missing permission), `"USAGE_EXCEEDED"`, or `"USER_NOT_MEMBER_OF_ORGANIZATION"`. A successful check writes `last_request` and decrements `remaining` when it is a number. An expired key, and a key whose remaining count is already 0, is deleted.
+`verify_api_key/2` returns the Better Auth result map. Invalid keys are `valid: false` with `error.code` of `"INVALID_API_KEY"`, `"KEY_DISABLED"`, `"KEY_EXPIRED"`, or `"USER_NOT_MEMBER_OF_ORGANIZATION"`. A successful check writes `last_request`. An expired key is deleted. Two verifies of the same expired key both return invalid. Neither raises if the row was already deleted.
 
-`list_api_keys/2` can filter with `:config_id`, `:tenant_id`, or `:organization_id`, and page with `:limit` and `:offset`. Sort fields are `createdAt`, `name`, and `expiresAt`.
+`list_api_keys/2` can filter with `:tenant_id` or `:organization_id`, and page with `:limit` and `:offset`. An offset without a limit returns the remaining rows. Sort fields are `createdAt`, `name`, and `expiresAt`.
 
-`get_api_key/2` and `update_api_key/3` also omit the secret. Update accepts `:name`, `:enabled`, `:remaining`, `:metadata`, `:permissions`, and `:expires_in` (`nil` clears the expiry).
+`get_api_key/2` and `update_api_key/3` also omit the secret. Update accepts `:name` and `:enabled`.
 
 `delete_all_expired_api_keys/1` removes expired API keys. Create, list, and verify call it with a 10 second cooldown. Pass `force: true` to run it immediately. Sessions are left alone.
 
@@ -134,9 +133,6 @@ config :auth_kit,
     default_prefix: "pup_",
     default_key_length: 64,
     require_name: false,
-    enable_metadata: true,
-    default_permissions: %{projects: ["read"]},
-    starting_characters_config: [should_store: true, characters_length: 6],
     key_expiration: [
       default_expires_in: nil,
       disable_custom_expires_time: false,
@@ -148,20 +144,22 @@ config :auth_kit,
 
 `:default_key_length` is the number of random letters after the prefix. The alphabet is `a-zA-Z`, matching Better Auth's default generator. `:default_expires_in` is seconds. Better Auth's reference page describes that plugin option in milliseconds; the create API and this library use seconds, which is what `expiresIn` means on `createApiKey`.
 
-`:default_permissions` may be a map or a function of the user.
+`:maximum_prefix_length` defaults to 32 and is capped there. The stored `prefix` is that configured string, never a slice of the generated key. A `starting_characters_config` `characters_length` longer than the key does not copy the secret into the row.
 
 ## Tenants
 
-A scoped key verifies only while the user is still a member of `active_tenant_id`. `remove_member/3` and `leave_tenant/2` delete that user's keys for the tenant. Deleting the tenant deletes every key scoped to it. Session tokens on that tenant only have `active_tenant_id` cleared. Unscoped keys stay valid.
+A scoped key verifies only while the user is still a member of `active_tenant_id`. `remove_member/3` and `leave_tenant/2` delete that user's keys for the tenant. `Tenants.delete_tenant/2` deletes every key scoped to the tenant before the tenant row goes away.
+
+`active_tenant_id` is `ON DELETE SET NULL`. A session that pointed at the tenant stays valid with that column cleared. A raw `Repo.delete(tenant)` does the same to the column on an API key, but the key's `tenant_scoped` flag stays true, so `verify_api_key/2` rejects it instead of treating it as an unscoped user key. Unscoped keys stay valid.
 
 Better Auth can store organization-owned keys whose `referenceId` is the organization (`references: "organization"`). AuthKit does not do that yet. The owner is always the user.
 
 ## Not in this slice
 
+- Per-key permissions (Better Auth's permission map on a key is not stored or enforced)
 - Rate limiting (Better Auth turns it on by default: 10 requests per day)
 - Refill (`refillAmount` / `refillInterval`)
-- Secondary storage and multiple configuration objects (`config_id` is stored and can filter, and there is one option set)
+- Secondary storage and multiple configuration objects
 - Organization-owned keys
 - `enableSessionForAPIKeys` beyond the bearer assigns above
 - Disabling the hash, or a custom key generator
-- Permission wildcards from Better Auth's access plugin. Verification requires each requested action to be listed on the key
