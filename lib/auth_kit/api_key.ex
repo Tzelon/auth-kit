@@ -1,8 +1,6 @@
 defmodule AuthKit.ApiKey do
   @moduledoc """
-  API keys for scripts and CI, modeled on Better Auth's API key plugin.
-
-  https://better-auth.com/docs/plugins/api-key
+  API keys for scripts and CI.
 
   Keys live in the user token table with context `"api"`. The plaintext is
   returned once from `create_api_key/2`. The row stores `SHA-256` of that
@@ -10,18 +8,10 @@ defmodule AuthKit.ApiKey do
   configured, non-secret prefix safe to show in a list. It never contains
   the generated key.
 
-  | Better Auth | AuthKit |
-  | --- | --- |
-  | `createApiKey` | `create_api_key/2` |
-  | `verifyApiKey` | `verify_api_key/2` |
-  | `getApiKey` | `get_api_key/2` |
-  | `updateApiKey` | `update_api_key/3` |
-  | `deleteApiKey` | `delete_api_key/2` (`revoke_api_key/2`) |
-  | `listApiKeys` | `list_api_keys/2` |
-  | `deleteAllExpiredApiKeys` | `delete_all_expired_api_keys/1` |
-
-  `AuthKit.Auth` exposes the same functions. The user is an argument here.
-  Better Auth reads the user from the session when the call comes from HTTP.
+  `create_api_key/2`, `verify_api_key/2`, `get_api_key/2`, `update_api_key/3`,
+  `delete_api_key/2` (`revoke_api_key/2`), `list_api_keys/2`, and
+  `delete_all_expired_api_keys/1` are also on `AuthKit.Auth`. The user is
+  an argument.
 
   A key is owned by a user (`reference_id` / `user_id`). Pass `tenant_id:`
   or `organization_id:` to scope it to a tenant the user belongs to
@@ -32,22 +22,20 @@ defmodule AuthKit.ApiKey do
   false) and stays valid. Session rows share `active_tenant_id` and only
   have that column cleared.
 
-  Better Auth can instead make the organization itself the owner
-  (`references: "organization"`). That mode is not built yet. Per-key
+  Making the tenant itself the owner of a key is not built yet. Per-key
   permissions, rate limiting, and refill are not built yet either.
 
-  Configure defaults with `config :auth_kit, api_key: [...]`. Option names
-  match the plugin in snake_case: `:default_prefix`, `:default_key_length`
-  (64), `:require_name`, `:minimum_name_length`, `:maximum_name_length`
-  (32), `:minimum_prefix_length`, `:maximum_prefix_length` (32),
+  Configure defaults with `config :auth_kit, api_key: [...]`:
+  `:default_prefix`, `:default_key_length` (64), `:require_name`,
+  `:minimum_name_length`, `:maximum_name_length` (32),
+  `:minimum_prefix_length`, `:maximum_prefix_length` (32),
   `:api_key_headers`, and `:key_expiration` (`default_expires_in` in
   seconds, `disable_custom_expires_time`, `min_expires_in` and
   `max_expires_in` in days).
 
-  `expires_in` is seconds, matching Better Auth's create body. `nil` means
-  no expiry unless `:default_expires_in` is set. Permissions, metadata,
-  rate limiting, and refill are not implemented; passing those options
-  returns `{:error, {:not_supported, field}}`.
+  `expires_in` is seconds. `nil` means no expiry unless `:default_expires_in`
+  is set. Permissions, metadata, rate limiting, and refill are not
+  implemented; passing those options returns `{:error, {:not_supported, field}}`.
 
   Ids follow the host schema. `get_api_key/2`, `update_api_key/3`,
   `delete_api_key/2`, and `revoke_api_key/2` cast with the token schema's
@@ -276,7 +264,7 @@ defmodule AuthKit.ApiKey do
 
   Returns `{:ok, %{success: true}}`. A missing key, a key owned by someone
   else, and a session token id are `{:error, :not_found}`. Other keys and
-  sessions are left in place. This is Better Auth's `deleteApiKey`.
+  sessions are left in place.
 
   `id` is cast with the token schema's primary key type.
   """
@@ -311,7 +299,7 @@ defmodule AuthKit.ApiKey do
   Deletes API keys whose `expires_at` is in the past.
 
   Returns `{:ok, count}`. Calls from create, list, and verify share a 10
-  second cooldown, matching Better Auth. Pass `force: true` to ignore it.
+  second cooldown. Pass `force: true` to ignore it.
   Session tokens are not deleted.
   """
   def delete_all_expired_api_keys(opts \\ []) when is_list(opts) do
