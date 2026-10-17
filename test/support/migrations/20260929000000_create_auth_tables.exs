@@ -103,6 +103,11 @@ defmodule AuthKit.Test.Repo.Migrations.CreateAuthTables do
 
     alter table(:users_tokens) do
       add(:active_tenant_id, references(:tenants, type: :binary_id, on_delete: :nilify_all))
+
+      add(
+        :tenant_member_id,
+        references(:tenant_members, type: :binary_id, on_delete: :nilify_all)
+      )
     end
 
     # Integer primary key, used to prove revoke/get/update accept the schema's
@@ -120,6 +125,11 @@ defmodule AuthKit.Test.Repo.Migrations.CreateAuthTables do
       add(:last_request, :utc_datetime_usec)
       add(:tenant_scoped, :boolean, null: false, default: false)
       add(:updated_at, :utc_datetime_usec)
+
+      add(
+        :tenant_member_id,
+        references(:tenant_members, type: :binary_id, on_delete: :nilify_all)
+      )
 
       timestamps(type: :utc_datetime, updated_at: false)
     end

@@ -15,13 +15,14 @@ defmodule AuthKit.ApiKey do
       AuthKit.Auth.create_api_key(user, name: "ci", prefix: "pup_")
 
   The key belongs to that user, stored as `user_id`. Pass `tenant_id:` to
-  limit it to a tenant the user belongs to. The id is stored in
-  `active_tenant_id`, and `tenant_scoped` is set. Removing the membership
-  revokes the scoped keys. Deleting the tenant row, including a raw
-  `Repo.delete/1`, clears `active_tenant_id` and the scoped key stops
-  authenticating. An unscoped key has `tenant_scoped` false and stays
-  valid. Session rows share `active_tenant_id` and only have that column
-  cleared.
+  limit it to a tenant the user belongs to. The tenant id is stored in
+  `active_tenant_id`, `tenant_scoped` is set, and `tenant_member_id` is the
+  membership row from that moment. Deleting that membership, including a
+  raw delete, retires the key. A later membership for the same user does
+  not revive it. Deleting the tenant row, including a raw `Repo.delete/1`,
+  clears `active_tenant_id` and the scoped key stops authenticating. An
+  unscoped key has `tenant_scoped` false and stays valid. Session rows
+  share `active_tenant_id` and only have that column cleared.
 
   Configure defaults with `config :auth_kit, api_key: [...]`:
   `:default_prefix`, `:default_key_length` (64), `:require_name`,
@@ -138,8 +139,8 @@ defmodule AuthKit.ApiKey do
          :ok <- validate_name(Keyword.get(opts, :name)),
          :ok <- validate_prefix(resolved_prefix(opts)),
          :ok <- validate_expires_in(Keyword.get(opts, :expires_in)),
-         {:ok, tenant_id} <- resolve_tenant(user, opts) do
-      insert_key(user, opts, tenant_id)
+         {:ok, scope} <- resolve_tenant(user, opts) do
+      insert_key(user, opts, scope)
     end
   end
 
@@ -235,7 +236,7 @@ defmodule AuthKit.ApiKey do
 
     with :ok <- ensure_user(user),
          :ok <- reject_unsupported(opts),
-         {:ok, tenant_id} <- resolve_tenant(user, opts),
+         {:ok, scope} <- resolve_tenant(user, opts),
          {:ok, field, direction} <- sort(opts),
          {:ok, limit, offset} <- pagination(opts) do
       _ = delete_all_expired_api_keys()
@@ -245,7 +246,9 @@ defmodule AuthKit.ApiKey do
           where: t.user_id == ^user.id and t.context == ^context()
 
       base =
-        if tenant_id, do: from(t in base, where: t.active_tenant_id == ^tenant_id), else: base
+        if scope,
+          do: from(t in base, where: t.active_tenant_id == ^scope.tenant_id),
+          else: base
 
       total = Repo.one(from t in base, select: count(t.id)) || 0
 
@@ -335,7 +338,7 @@ defmodule AuthKit.ApiKey do
     from(t in schema(), where: t.context == ^context() and t.active_tenant_id == ^tenant_id)
   end
 
-  defp insert_key(user, opts, tenant_id) do
+  defp insert_key(user, opts, scope) do
     prefix = resolved_prefix(opts)
     plaintext = (prefix || "") <> random_letters(key_length())
     now = DateTime.utc_now()
@@ -352,13 +355,16 @@ defmodule AuthKit.ApiKey do
       prefix: stored_prefix(prefix, plaintext),
       enabled: true,
       last_request: nil,
-      tenant_scoped: not is_nil(tenant_id),
+      tenant_scoped: not is_nil(scope),
       updated_at: now
     }
 
     attrs =
-      if tenant_id do
-        Map.put(attrs, :active_tenant_id, tenant_id)
+      if scope do
+        Map.merge(attrs, %{
+          active_tenant_id: scope.tenant_id,
+          tenant_member_id: scope.member_id
+        })
       else
         attrs
       end
@@ -389,6 +395,7 @@ defmodule AuthKit.ApiKey do
         failure("KEY_EXPIRED")
 
       not member_ok?(token) ->
+        delete_token(token.id)
         failure("USER_NOT_MEMBER_OF_TENANT")
 
       true ->
@@ -429,26 +436,29 @@ defmodule AuthKit.ApiKey do
     DateTime.compare(DateTime.utc_now(), expires_at) == :gt
   end
 
-  # `active_tenant_id` is ON DELETE SET NULL so a session survives tenant
-  # deletion. That nil is also what an unscoped key stores. `tenant_scoped`
-  # keeps the two apart: a scoped key whose tenant row is gone is rejected.
-  defp member_ok?(token) do
+  # A scoped key is bound to one membership row. A raw delete nilifies
+  # `tenant_member_id`. A later membership is a new row, so the old key
+  # stays invalid. Unscoped keys have `tenant_scoped` false.
+  defp member_ok?(%{tenant_scoped: true} = token) do
+    member_id = Map.get(token, :tenant_member_id)
     tenant_id = active_tenant_id(token)
 
-    cond do
-      token.tenant_scoped == true and is_nil(tenant_id) ->
+    case {member_id, tenant_id} do
+      {nil, _} ->
         false
 
-      is_nil(tenant_id) ->
-        true
+      {_, nil} ->
+        false
 
-      true ->
-        Repo.exists?(
-          from m in Config.tenant_member_schema(),
-            where: m.user_id == ^token.user_id and m.tenant_id == ^tenant_id
-        )
+      {member_id, tenant_id} ->
+        case Repo.get(Config.tenant_member_schema(), member_id) do
+          %{user_id: user_id, tenant_id: ^tenant_id} -> user_id == token.user_id
+          _member -> false
+        end
     end
   end
+
+  defp member_ok?(_token), do: true
 
   defp to_metadata(token) do
     tenant_id = active_tenant_id(token)
@@ -462,6 +472,7 @@ defmodule AuthKit.ApiKey do
       reference_id: token.user_id,
       user_id: token.user_id,
       active_tenant_id: tenant_id,
+      tenant_member_id: Map.get(token, :tenant_member_id),
       tenant_scoped: token.tenant_scoped == true,
       last_request: token.last_request,
       created_at: token.inserted_at,
@@ -572,10 +583,11 @@ defmodule AuthKit.ApiKey do
 
       id ->
         ensure_tenant_field!()
+        ensure_member_field!()
 
         with {:ok, tenant} <- fetch_tenant(id),
-             :ok <- ensure_member(user, tenant.id) do
-          {:ok, tenant.id}
+             {:ok, member} <- fetch_member(user, tenant.id) do
+          {:ok, %{tenant_id: tenant.id, member_id: member.id}}
         end
     end
   end
@@ -593,14 +605,11 @@ defmodule AuthKit.ApiKey do
     Ecto.Query.CastError -> {:error, :not_found}
   end
 
-  defp ensure_member(user, tenant_id) do
-    exists =
-      Repo.exists?(
-        from m in Config.tenant_member_schema(),
-          where: m.user_id == ^user.id and m.tenant_id == ^tenant_id
-      )
-
-    if exists, do: :ok, else: {:error, :not_a_member}
+  defp fetch_member(user, tenant_id) do
+    case Repo.get_by(Config.tenant_member_schema(), user_id: user.id, tenant_id: tenant_id) do
+      nil -> {:error, :not_a_member}
+      member -> {:ok, member}
+    end
   end
 
   defp ensure_tenant_field! do
@@ -609,6 +618,16 @@ defmodule AuthKit.ApiKey do
     else
       raise ArgumentError, """
       Scoped API keys need auth_kit_active_tenant_field/0 on the user token schema.
+      """
+    end
+  end
+
+  defp ensure_member_field! do
+    if :tenant_member_id in schema().__schema__(:fields) do
+      :ok
+    else
+      raise ArgumentError, """
+      Scoped API keys need tenant_member_id. Configure :tenant_member and call auth_kit_api_key_fields/0 so the membership row can be stored.
       """
     end
   end

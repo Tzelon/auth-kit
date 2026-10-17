@@ -60,11 +60,17 @@ alter table(:users_tokens) do
   add :tenant_scoped, :boolean, null: false, default: false
   add :updated_at, :utc_datetime_usec
 end
+
+alter table(:users_tokens) do
+  add :tenant_member_id, references(:tenant_members, type: :binary_id, on_delete: :nilify_all)
+end
 ```
+
+`tenant_member_id` uses the host's member primary key type. The test app uses `:binary_id`.
 
 `name` is the label. `prefix` is the configured prefix (`"pup_"`), capped at 32 characters. It is the only display fragment stored, and it never includes the generated key. `last_request` is the last successful verification. `expires_at` is already on the table and stays `nil` when the key does not expire. `updated_at` changes when the key is updated or successfully verified.
 
-`tenant_scoped` is true when the key was created for a tenant. `active_tenant_id` uses `ON DELETE SET NULL` so a session row stays valid after the tenant is deleted. A scoped API key whose `active_tenant_id` becomes `nil` does not authenticate. An unscoped key has `tenant_scoped` false and a null `active_tenant_id`, and stays valid.
+`tenant_scoped` is true when the key was created for a tenant. `tenant_member_id` is that membership row. Deleting the membership nilifies it, and a new membership does not fill it back in, so the old key stays invalid. `active_tenant_id` uses `ON DELETE SET NULL` so a session row stays valid after the tenant is deleted. A scoped API key whose `active_tenant_id` becomes `nil` does not authenticate. An unscoped key has `tenant_scoped` false and a null `active_tenant_id`, and stays valid.
 
 The lookup uses the existing unique index on `(context, token)`.
 
@@ -86,7 +92,7 @@ api_key.key
 
 `expires_in` is seconds. Omit it, or pass `nil`, to use `:default_expires_in` from config. When that is also unset, the key does not expire. Custom lifetimes must sit between 1 and 365 days unless `key_expiration` changes `min_expires_in` and `max_expires_in`.
 
-`tenant_id` scopes the key to a tenant the user already belongs to. The owner's id stays `user_id`. The tenant id is stored in `active_tenant_id`, and `tenant_scoped` is set. `organization_id` is rejected.
+`tenant_id` scopes the key to a tenant the user already belongs to. The owner's id stays `user_id`. The tenant id is stored in `active_tenant_id`, `tenant_scoped` is set, and `tenant_member_id` records that membership. `organization_id` is rejected.
 
 `:organization_id`, `:permissions`, `:metadata`, `:remaining`, `:config_id`, `:refill_amount`, `:refill_interval`, `:rate_limit_enabled`, `:rate_limit_max`, and `:rate_limit_time_window` return `{:error, {:not_supported, field}}`.
 
@@ -148,7 +154,7 @@ config :auth_kit,
 
 ## Tenants
 
-A scoped key verifies only while the user is still a member of `active_tenant_id`. `remove_member/3` and `leave_tenant/2` delete that user's keys for the tenant. `Tenants.delete_tenant/2` deletes every key scoped to the tenant before the tenant row goes away.
+A scoped key verifies only while `tenant_member_id` still points at the membership from create time. `remove_member/3` and `leave_tenant/2` delete that user's keys for the tenant. A raw delete of the membership nilifies `tenant_member_id`. Adding the user again creates a new membership and does not revive the key. `Tenants.delete_tenant/2` deletes every key scoped to the tenant before the tenant row goes away.
 
 `active_tenant_id` is `ON DELETE SET NULL`. A session that pointed at the tenant stays valid with that column cleared. A raw `Repo.delete(tenant)` does the same to the column on an API key, but the key's `tenant_scoped` flag stays true, so `verify_api_key/2` rejects it instead of treating it as an unscoped user key. Unscoped keys stay valid.
 

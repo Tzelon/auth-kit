@@ -382,26 +382,17 @@ defmodule AuthKit.ApiKeyTest do
 
     assert listed.id == scoped.id
 
+    assert scoped.tenant_member_id == member.id
+
     Repo.delete!(member)
+    assert {:ok, _} = Tenants.add_member(owner, tenant, %{user_id: user.id, role: ["member"]})
 
     assert %{valid: false, error: %{code: "USER_NOT_MEMBER_OF_TENANT"}} =
              Auth.verify_api_key(scoped.key)
 
-    assert Repo.get(UserToken, scoped.id)
-
-    assert {:ok, readded} =
-             Tenants.add_member(owner, tenant, %{user_id: user.id, role: ["member"]})
-
-    assert %{valid: true} = Auth.verify_api_key(scoped.key)
-    assert {:ok, _} = Tenants.remove_member(owner, readded.id)
-
     refute Repo.get(UserToken, scoped.id)
-    assert %{valid: false} = Auth.verify_api_key(scoped.key)
     assert %{valid: true} = Auth.verify_api_key(unscoped.key)
     assert Auth.fetch_user_by_session_token(session).id == user.id
-
-    session_row = Repo.get_by!(UserToken, token: session, context: "session")
-    assert is_nil(session_row.active_tenant_id)
   end
 
   test "leaving a tenant revokes that user's scoped keys and keeps the owner's" do
