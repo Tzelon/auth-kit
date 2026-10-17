@@ -237,14 +237,9 @@ defmodule AuthKit.ApiKey do
 
       total = Repo.one(from t in base, select: count(t.id)) || 0
 
-      query =
-        from t in base,
-          order_by: [{^direction, ^field}, asc: t.id],
-          offset: ^offset
-
       keys =
-        query
-        |> maybe_limit(limit)
+        base
+        |> order_page(field, direction, limit, offset)
         |> Repo.all()
         |> Enum.map(&to_metadata/1)
 
@@ -633,8 +628,24 @@ defmodule AuthKit.ApiKey do
     end
   end
 
-  defp maybe_limit(query, nil), do: query
-  defp maybe_limit(query, limit), do: from(t in query, limit: ^limit)
+  # SQLite rejects OFFSET unless LIMIT is present. A negative limit means no cap.
+  defp order_page(query, field, direction, nil, 0) do
+    from t in query, order_by: [{^direction, ^field}, asc: t.id]
+  end
+
+  defp order_page(query, field, direction, nil, offset) do
+    from t in query,
+      order_by: [{^direction, ^field}, asc: t.id],
+      limit: fragment("-1"),
+      offset: ^offset
+  end
+
+  defp order_page(query, field, direction, limit, offset) do
+    from t in query,
+      order_by: [{^direction, ^field}, asc: t.id],
+      limit: ^limit,
+      offset: ^offset
+  end
 
   defp filter_config_id(opts) do
     case Keyword.get(opts, :config_id) do
