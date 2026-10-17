@@ -350,11 +350,14 @@ defmodule AuthKit.ApiKeyTest do
     assert {:error, :not_a_member} =
              Auth.create_api_key(stranger, name: "nope", tenant_id: tenant.id)
 
+    assert {:error, {:not_supported, :organization_id}} =
+             Auth.create_api_key(user, name: "ci", organization_id: tenant.id)
+
     assert {:ok, scoped} =
-             Auth.create_api_key(user, name: "ci", prefix: "pup_", organization_id: tenant.id)
+             Auth.create_api_key(user, name: "ci", prefix: "pup_", tenant_id: tenant.id)
 
     assert scoped.active_tenant_id == tenant.id
-    assert scoped.organization_id == tenant.id
+    refute Map.has_key?(scoped, :organization_id)
     assert scoped.reference_id == user.id
     assert scoped.tenant_scoped
 
@@ -375,13 +378,13 @@ defmodule AuthKit.ApiKeyTest do
     assert conn.assigns.current_api_key.id == scoped.id
 
     assert {:ok, %{api_keys: [listed], total: 1}} =
-             Auth.list_api_keys(user, organization_id: tenant.id)
+             Auth.list_api_keys(user, tenant_id: tenant.id)
 
     assert listed.id == scoped.id
 
     Repo.delete!(member)
 
-    assert %{valid: false, error: %{code: "USER_NOT_MEMBER_OF_ORGANIZATION"}} =
+    assert %{valid: false, error: %{code: "USER_NOT_MEMBER_OF_TENANT"}} =
              Auth.verify_api_key(scoped.key)
 
     assert Repo.get(UserToken, scoped.id)
@@ -453,7 +456,7 @@ defmodule AuthKit.ApiKeyTest do
     assert row.tenant_scoped
     assert is_nil(row.active_tenant_id)
 
-    assert %{valid: false, error: %{code: "USER_NOT_MEMBER_OF_ORGANIZATION"}} =
+    assert %{valid: false, error: %{code: "USER_NOT_MEMBER_OF_TENANT"}} =
              Auth.verify_api_key(scoped.key)
 
     blocked =

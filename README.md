@@ -112,15 +112,15 @@ return name, prefix, timestamps, expiry, and last use, never the secret.
 calls accept the token schema's primary key, including an integer id.
 
 Add `auth_kit_api_key_fields/0` to the user token schema and run the
-migration in `docs/api_keys.md`. Pass `tenant_id:` or `organization_id:` to
-scope a key to a tenant the user belongs to. Removing that membership
+migration in `docs/api_keys.md`. Pass `tenant_id:` to scope a key to a
+tenant the user belongs to. Removing that membership
 revokes those keys. Deleting the tenant, including a raw delete of the
 tenant row, stops the scoped key from authenticating. Session tokens only
 have `active_tenant_id` cleared. A scoped key sets `:current_tenant_id` on
 the bearer plug.
 
-Per-key permissions, rate limiting, refill, and organization-owned keys
-(the tenant is the owner, rather than a scope on a user's key) are not
-implemented yet. Passing those options returns
-`{:error, {:not_supported, field}}`.
+A key owned by the tenant, per-key permissions, and request quotas are
+proposed in
+`docs/contributing/proposals/001-api-key-ownership-and-limits.md`.
+Passing those options returns `{:error, {:not_supported, field}}`.
 

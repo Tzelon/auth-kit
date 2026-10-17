@@ -8,22 +8,20 @@ defmodule AuthKit.ApiKey do
   configured, non-secret prefix safe to show in a list. It never contains
   the generated key.
 
-  `create_api_key/2`, `verify_api_key/2`, `get_api_key/2`, `update_api_key/3`,
-  `delete_api_key/2` (`revoke_api_key/2`), `list_api_keys/2`, and
-  `delete_all_expired_api_keys/1` are also on `AuthKit.Auth`. The user is
-  an argument.
+  `AuthKit.Auth` defines the same functions as this module. Both take the
+  user struct, except verify, which takes the plaintext key:
 
-  A key is owned by a user (`reference_id` / `user_id`). Pass `tenant_id:`
-  or `organization_id:` to scope it to a tenant the user belongs to
-  (`active_tenant_id`). That sets `tenant_scoped`. Removing the membership
+      AuthKit.ApiKey.create_api_key(user, name: "ci", prefix: "pup_")
+      AuthKit.Auth.create_api_key(user, name: "ci", prefix: "pup_")
+
+  The key belongs to that user, stored as `user_id`. Pass `tenant_id:` to
+  limit it to a tenant the user belongs to. The id is stored in
+  `active_tenant_id`, and `tenant_scoped` is set. Removing the membership
   revokes the scoped keys. Deleting the tenant row, including a raw
   `Repo.delete/1`, clears `active_tenant_id` and the scoped key stops
-  authenticating. An unscoped key never had a tenant (`tenant_scoped` is
-  false) and stays valid. Session rows share `active_tenant_id` and only
-  have that column cleared.
-
-  Making the tenant itself the owner of a key is not built yet. Per-key
-  permissions, rate limiting, and refill are not built yet either.
+  authenticating. An unscoped key has `tenant_scoped` false and stays
+  valid. Session rows share `active_tenant_id` and only have that column
+  cleared.
 
   Configure defaults with `config :auth_kit, api_key: [...]`:
   `:default_prefix`, `:default_key_length` (64), `:require_name`,
@@ -34,8 +32,10 @@ defmodule AuthKit.ApiKey do
   `max_expires_in` in days).
 
   `expires_in` is seconds. `nil` means no expiry unless `:default_expires_in`
-  is set. Permissions, metadata, rate limiting, and refill are not
-  implemented; passing those options returns `{:error, {:not_supported, field}}`.
+  is set. A key owned by the tenant, per-key permissions, and request
+  quotas are sketched in
+  `docs/contributing/proposals/001-api-key-ownership-and-limits.md`.
+  Passing those options returns `{:error, {:not_supported, field}}`.
 
   Ids follow the host schema. `get_api_key/2`, `update_api_key/3`,
   `delete_api_key/2`, and `revoke_api_key/2` cast with the token schema's
@@ -77,6 +77,7 @@ defmodule AuthKit.ApiKey do
     remaining
     metadata
     config_id
+    organization_id
   )a
 
   @updatable ~w(name enabled)a
@@ -87,8 +88,7 @@ defmodule AuthKit.ApiKey do
     "INVALID_API_KEY" => "Invalid API key.",
     "KEY_DISABLED" => "API Key is disabled",
     "KEY_EXPIRED" => "API Key has expired",
-    "USER_NOT_MEMBER_OF_ORGANIZATION" =>
-      "You are not a member of the organization that owns this API key."
+    "USER_NOT_MEMBER_OF_TENANT" => "You are not a member of the tenant this API key is scoped to."
   }
 
   @doc """
@@ -126,7 +126,7 @@ defmodule AuthKit.ApiKey do
     * `:expires_in` — lifetime in seconds, or omit/`nil` for the configured default
     * `:prefix` — prepended to the key and stored for display, for example `"pup_"`.
       Only this prefix is stored. Generated key bytes are not.
-    * `:tenant_id` or `:organization_id` — tenant scope; the user must be a member
+    * `:tenant_id` — tenant scope; the user must be a member
     * `:user_id` — must match `user.id` when set
   """
   def create_api_key(user, opts \\ []) when is_list(opts) do
@@ -225,7 +225,7 @@ defmodule AuthKit.ApiKey do
 
   ## Options
 
-    * `:tenant_id` or `:organization_id` — only keys scoped to that tenant
+    * `:tenant_id` — only keys scoped to that tenant
     * `:limit`, `:offset` — `offset` without `limit` returns the rest of the rows
     * `:sort_by` — `"createdAt"`, `"name"`, or `"expiresAt"` (snake_case works too)
     * `:sort_direction` — `"asc"` or `"desc"` (default `"desc"`)
@@ -389,7 +389,7 @@ defmodule AuthKit.ApiKey do
         failure("KEY_EXPIRED")
 
       not member_ok?(token) ->
-        failure("USER_NOT_MEMBER_OF_ORGANIZATION")
+        failure("USER_NOT_MEMBER_OF_TENANT")
 
       true ->
         stamp(token, user)
@@ -461,7 +461,6 @@ defmodule AuthKit.ApiKey do
       expires_at: token.expires_at,
       reference_id: token.user_id,
       user_id: token.user_id,
-      organization_id: tenant_id,
       active_tenant_id: tenant_id,
       tenant_scoped: token.tenant_scoped == true,
       last_request: token.last_request,
@@ -567,33 +566,17 @@ defmodule AuthKit.ApiKey do
   end
 
   defp resolve_tenant(user, opts) do
-    case tenant_id_opt(opts) do
-      {:ok, nil} ->
+    case Keyword.get(opts, :tenant_id) do
+      nil ->
         {:ok, nil}
 
-      {:ok, id} ->
+      id ->
         ensure_tenant_field!()
 
         with {:ok, tenant} <- fetch_tenant(id),
              :ok <- ensure_member(user, tenant.id) do
           {:ok, tenant.id}
         end
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp tenant_id_opt(opts) do
-    tenant = Keyword.get(opts, :tenant_id)
-    organization = Keyword.get(opts, :organization_id)
-
-    cond do
-      is_nil(tenant) and is_nil(organization) -> {:ok, nil}
-      is_nil(tenant) -> {:ok, organization}
-      is_nil(organization) -> {:ok, tenant}
-      tenant == organization -> {:ok, tenant}
-      true -> {:error, :tenant_mismatch}
     end
   end
 

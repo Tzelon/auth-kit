@@ -16,7 +16,7 @@ The plaintext is returned once from `create_api_key/2`. The row stores `SHA-256`
 | `listApiKeys` | `list_api_keys/2` |
 | `deleteAllExpiredApiKeys` | `delete_all_expired_api_keys/1` |
 | `referenceId` | `reference_id` and `user_id` (the owning user) |
-| `organizationId` | `organization_id` and `active_tenant_id` (optional scope) |
+| `organizationId` | `tenant_id`, stored as `active_tenant_id` |
 | `lastRequest` | `last_request` |
 | `expiresAt` | `expires_at` (`nil` does not expire) |
 | `prefix` | `prefix` (configured prefix only, safe to display) |
@@ -86,9 +86,9 @@ api_key.key
 
 `expires_in` is seconds. Omit it, or pass `nil`, to use `:default_expires_in` from config. When that is also unset, the key does not expire. Custom lifetimes must sit between 1 and 365 days unless `key_expiration` changes `min_expires_in` and `max_expires_in`.
 
-`tenant_id` and `organization_id` are the same option. The user must already be a member. The key's `reference_id` stays the user. The tenant is the scope (`active_tenant_id`), which is this library's reading of Better Auth's organization id on a user-owned key. Creating with a tenant sets `tenant_scoped` to true.
+`tenant_id` scopes the key to a tenant the user already belongs to. The owner's id stays `user_id`. The tenant id is stored in `active_tenant_id`, and `tenant_scoped` is set. `organization_id` is rejected.
 
-`:permissions`, `:metadata`, `:remaining`, `:config_id`, `:refill_amount`, `:refill_interval`, `:rate_limit_enabled`, `:rate_limit_max`, and `:rate_limit_time_window` return `{:error, {:not_supported, field}}`.
+`:organization_id`, `:permissions`, `:metadata`, `:remaining`, `:config_id`, `:refill_amount`, `:refill_interval`, `:rate_limit_enabled`, `:rate_limit_max`, and `:rate_limit_time_window` return `{:error, {:not_supported, field}}`.
 
 ## Verify, list, revoke
 
@@ -103,9 +103,9 @@ api_key.key
 {:ok, %{success: true}} = AuthKit.ApiKey.revoke_api_key(user, metadata.id)
 ```
 
-`verify_api_key/2` returns the Better Auth result map. Invalid keys are `valid: false` with `error.code` of `"INVALID_API_KEY"`, `"KEY_DISABLED"`, `"KEY_EXPIRED"`, or `"USER_NOT_MEMBER_OF_ORGANIZATION"`. A successful check writes `last_request`. An expired key is deleted. Two verifies of the same expired key both return invalid. Neither raises if the row was already deleted.
+`verify_api_key/2` returns `%{valid: boolean, error: nil | %{code: code, message: message}, key: metadata | nil}`. Invalid keys use `error.code` `"INVALID_API_KEY"`, `"KEY_DISABLED"`, `"KEY_EXPIRED"`, or `"USER_NOT_MEMBER_OF_TENANT"`. A successful check writes `last_request`. An expired key is deleted. Two verifies of the same expired key both return invalid. Neither raises if the row was already deleted.
 
-`list_api_keys/2` can filter with `:tenant_id` or `:organization_id`, and page with `:limit` and `:offset`. An offset without a limit returns the remaining rows. Sort fields are `createdAt`, `name`, and `expiresAt`.
+`list_api_keys/2` can filter with `:tenant_id`, and page with `:limit` and `:offset`. An offset without a limit returns the remaining rows. Sort fields are `createdAt`, `name`, and `expiresAt`.
 
 `get_api_key/2` and `update_api_key/3` also omit the secret. Update accepts `:name` and `:enabled`.
 
@@ -152,14 +152,4 @@ A scoped key verifies only while the user is still a member of `active_tenant_id
 
 `active_tenant_id` is `ON DELETE SET NULL`. A session that pointed at the tenant stays valid with that column cleared. A raw `Repo.delete(tenant)` does the same to the column on an API key, but the key's `tenant_scoped` flag stays true, so `verify_api_key/2` rejects it instead of treating it as an unscoped user key. Unscoped keys stay valid.
 
-Better Auth can store organization-owned keys whose `referenceId` is the organization (`references: "organization"`). AuthKit does not do that yet. The owner is always the user.
-
-## Not in this slice
-
-- Per-key permissions (Better Auth's permission map on a key is not stored or enforced)
-- Rate limiting (Better Auth turns it on by default: 10 requests per day)
-- Refill (`refillAmount` / `refillInterval`)
-- Secondary storage and multiple configuration objects
-- Organization-owned keys
-- `enableSessionForAPIKeys` beyond the bearer assigns above
-- Disabling the hash, or a custom key generator
+The owner is always the user. A key the tenant itself owns, per-key permissions, and request quotas are proposed in `docs/contributing/proposals/001-api-key-ownership-and-limits.md`.
