@@ -34,6 +34,7 @@ defmodule AuthKit.Tenants do
   import Ecto.Changeset
   import Ecto.Query
 
+  alias AuthKit.ApiKey
   alias AuthKit.Repo
   alias AuthKit.Tenants.Access
   alias Ecto.Multi
@@ -617,8 +618,17 @@ defmodule AuthKit.Tenants do
 
   defp maybe_clear_all_sessions(multi, tenant) do
     if active_tenant_field?() do
-      query = from(t in user_token_schema(), where: t.active_tenant_id == ^tenant.id)
-      Multi.update_all(multi, :sessions, query, set: [active_tenant_id: nil])
+      api = ApiKey.context()
+
+      multi
+      |> Multi.delete_all(:api_keys, ApiKey.by_tenant_query(tenant.id))
+      |> Multi.update_all(
+        :sessions,
+        from(t in user_token_schema(),
+          where: t.active_tenant_id == ^tenant.id and t.context != ^api
+        ),
+        set: [active_tenant_id: nil]
+      )
     else
       multi
     end
@@ -1255,8 +1265,12 @@ defmodule AuthKit.Tenants do
 
   defp clear_active_tenant(user_id, tenant_id) do
     if active_tenant_field?() do
+      # Scoped API keys are revoked with the membership. Sessions only forget the tenant.
+      ApiKey.revoke_scoped(user_id, tenant_id)
+      api = ApiKey.context()
+
       from(t in user_token_schema(),
-        where: t.user_id == ^user_id and t.active_tenant_id == ^tenant_id
+        where: t.user_id == ^user_id and t.active_tenant_id == ^tenant_id and t.context != ^api
       )
       |> Repo.update_all(set: [active_tenant_id: nil])
     end

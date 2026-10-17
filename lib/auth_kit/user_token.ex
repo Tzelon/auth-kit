@@ -35,7 +35,11 @@ defmodule AuthKit.UserToken do
   defmacro __using__(_opts) do
     quote do
       import AuthKit.UserToken,
-        only: [auth_kit_user_token_fields: 0, auth_kit_active_tenant_field: 0]
+        only: [
+          auth_kit_user_token_fields: 0,
+          auth_kit_active_tenant_field: 0,
+          auth_kit_api_key_fields: 0
+        ]
     end
   end
 
@@ -65,6 +69,49 @@ defmodule AuthKit.UserToken do
   defmacro auth_kit_active_tenant_field do
     quote do
       belongs_to :active_tenant, AuthKit.Config.tenant_schema()
+    end
+  end
+
+  @doc """
+  Adds the columns an API key stores beside the hashed `token`.
+
+  Call this inside the user token schema when the app issues API keys.
+  Host apps migrate the columns themselves. Schemas that do not call
+  this macro stay as they are.
+
+      schema "users_tokens" do
+        auth_kit_user_token_fields()
+        auth_kit_api_key_fields()
+      end
+
+  `token` is the SHA-256 digest of the plaintext key, the same hash email
+  tokens use. `prefix` is the configured prefix and is safe to display. It
+  does not include generated key bytes. `tenant_scoped` is true when the
+  key was created for a tenant. `tenant_member_id` is that membership row.
+  A new membership does not revive the key. `active_tenant_id` is cleared
+  when that tenant row is deleted; a scoped key with a null tenant does not
+  authenticate. `expires_at` from `auth_kit_user_token_fields/0` stays null
+  when the key does not expire. `last_request` is the last successful
+  verification.
+  """
+  defmacro auth_kit_api_key_fields do
+    member = Application.get_env(:auth_kit, :tenant_member)
+
+    member_field =
+      if is_atom(member) and not is_nil(member) do
+        quote do
+          belongs_to :tenant_member, unquote(member)
+        end
+      end
+
+    quote do
+      field :name, :string
+      field :prefix, :string
+      field :enabled, :boolean, default: true
+      field :last_request, :utc_datetime_usec
+      field :tenant_scoped, :boolean, default: false
+      field :updated_at, :utc_datetime_usec
+      unquote(member_field)
     end
   end
 

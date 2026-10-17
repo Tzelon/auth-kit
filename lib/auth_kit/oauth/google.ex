@@ -68,7 +68,8 @@ defmodule AuthKit.OAuth.Google do
   end
 
   defp check_error(%{"error" => error} = params) do
-    {:error, Error.exception(message: "Google returned an error: #{params["error_description"] || error}")}
+    {:error,
+     Error.exception(message: "Google returned an error: #{params["error_description"] || error}")}
   end
 
   defp check_error(_params), do: :ok
@@ -100,7 +101,10 @@ defmodule AuthKit.OAuth.Google do
           {:ok, token}
 
         {:ok, status, body} ->
-          {:error, Error.exception(message: "Token request failed with status #{status}: #{inspect(body)}")}
+          {:error,
+           Error.exception(
+             message: "Token request failed with status #{status}: #{inspect(body)}"
+           )}
 
         {:error, error} ->
           {:error, error}
@@ -116,7 +120,11 @@ defmodule AuthKit.OAuth.Google do
          :ok <- check_claim(claims["iss"] in @issuers, "Invalid issuer"),
          :ok <- check_claim(claims["aud"] == config[:client_id], "Invalid audience"),
          :ok <- check_claim(not expired?(claims["exp"]), "ID token has expired"),
-         :ok <- check_claim(claims["nonce"] == (session_params[:nonce] || session_params["nonce"]), "Invalid nonce"),
+         :ok <-
+           check_claim(
+             claims["nonce"] == (session_params[:nonce] || session_params["nonce"]),
+             "Invalid nonce"
+           ),
          # Callers match accounts by email, so an unverified email must never get through.
          :ok <- check_claim(claims["email_verified"] in [true, "true"], "Email is not verified") do
       {:ok, claims}

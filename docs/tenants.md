@@ -109,7 +109,7 @@ Extra columns are ordinary Ecto fields on the host schema. `create_tenant/2` and
 
 ## What a session means
 
-A new session leaves `active_tenant_id` empty. `set_active_tenant/2` sets it to a tenant the user belongs to, or clears it with `nil`. Two sessions for the same user can sit in different tenants. Deleting a tenant nulls every token still pointing at it.
+A new session leaves `active_tenant_id` empty. `set_active_tenant/2` sets it to a tenant the user belongs to, or clears it with `nil`. Two sessions for the same user can sit in different tenants. Deleting a tenant clears `active_tenant_id` on session tokens that pointed at it, and those sessions stay valid. API keys scoped to that tenant stop authenticating, including when the tenant row is deleted directly and the foreign key only nilifies `active_tenant_id`. Removing a member or leaving a tenant deletes that user's keys scoped to the tenant. See `docs/api_keys.md`.
 
 `get_tenant/1` and `get_full_tenant/1` use the session's active tenant when no id or slug is passed.
 
