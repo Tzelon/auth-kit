@@ -123,7 +123,7 @@ api_key.key
 plug AuthKit.Auth.Bearer
 ```
 
-The plug assigns `:current_user`. For an API key it also assigns `:current_api_key` (metadata, no secret) and `:current_tenant_id` when the key is scoped.
+The plug assigns `:current_user`. For an API key it also assigns `:current_api_key` (metadata, no secret) and `:current_tenant_id` when the key is scoped. Device authorization issues one of these keys for a CLI. See `docs/device_flow.md`.
 
 `x-api-key` wins when it is present, including over a bearer session on the same request. Otherwise `Authorization: Bearer` is tried as a session token and then as an API key, so existing session clients keep working.
 

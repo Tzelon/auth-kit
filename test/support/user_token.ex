@@ -8,5 +8,6 @@ defmodule AuthKit.Test.UserToken do
     auth_kit_user_token_fields()
     auth_kit_active_tenant_field()
     auth_kit_api_key_fields()
+    auth_kit_device_fields()
   end
 end

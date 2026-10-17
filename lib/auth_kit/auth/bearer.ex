@@ -16,6 +16,11 @@ defmodule AuthKit.Auth.Bearer do
 
   When `x-api-key` is present, a bearer session on the same request is not used.
 
+  A device-authorization login returns an API key in `access_token`.
+  Send that string in `Authorization: Bearer` or `x-api-key`. It is the
+  plaintext key, not a base64 session token. `AuthKit.Device.credential_headers/1`
+  builds both headers.
+
   Assigns:
 
     * `:current_user` — the user, or `nil`

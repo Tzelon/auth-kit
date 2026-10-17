@@ -124,3 +124,17 @@ proposed in
 `docs/contributing/proposals/001-api-key-ownership-and-limits.md`.
 Passing those options returns `{:error, {:not_supported, field}}`.
 
+## Device authorization
+
+CLI login uses the OAuth 2.0 Device Authorization Grant (RFC 8628).
+`AuthKit.Device.request_device_authorization/1` returns a `device_code`,
+a short `user_code`, a `verification_uri`, and the poll `interval`.
+A signed-in user approves that code with `approve_device_authorization/3`.
+`poll_device_token/2` then returns an API key once, in `access_token`.
+The CLI stores that key and sends it to `plug AuthKit.Auth.Bearer`.
+
+Pending polls return `:authorization_pending`. Polling faster than
+`interval` returns `:slow_down`. Denial is `:access_denied`. An expired
+code is `:expired_token`. See `docs/device_flow.md` for the endpoints a
+host mounts and the config options.
+

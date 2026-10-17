@@ -191,6 +191,36 @@ defmodule AuthKit.Auth do
   def delete_all_expired_api_keys(opts \\ []),
     do: AuthKit.ApiKey.delete_all_expired_api_keys(opts)
 
+  @doc """
+  Starts an OAuth 2.0 device authorization. See `AuthKit.Device.request_device_authorization/1`.
+  """
+  def request_device_authorization(opts \\ []),
+    do: AuthKit.Device.request_device_authorization(opts)
+
+  @doc """
+  Loads a device grant for the approval page. See `AuthKit.Device.get_device_authorization/2`.
+  """
+  def get_device_authorization(user, user_code),
+    do: AuthKit.Device.get_device_authorization(user, user_code)
+
+  @doc """
+  Approves a device grant for `user`. See `AuthKit.Device.approve_device_authorization/3`.
+  """
+  def approve_device_authorization(user, user_code, opts \\ []),
+    do: AuthKit.Device.approve_device_authorization(user, user_code, opts)
+
+  @doc """
+  Denies a device grant. See `AuthKit.Device.deny_device_authorization/2`.
+  """
+  def deny_device_authorization(user, user_code),
+    do: AuthKit.Device.deny_device_authorization(user, user_code)
+
+  @doc """
+  Polls a device code. See `AuthKit.Device.poll_device_token/2`.
+  """
+  def poll_device_token(device_code, opts \\ []),
+    do: AuthKit.Device.poll_device_token(device_code, opts)
+
   def generate_email_token(user, context)
       when is_struct(user, @user) and context in ["login", "confirm", "reset_password"] do
     {encoded_token, user_token} = UserToken.build_email_token(user, context)

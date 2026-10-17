@@ -56,11 +56,19 @@ defmodule AuthKit.Test.Repo.Migrations.CreateAuthTables do
       add(:tenant_scoped, :boolean, null: false, default: false)
       add(:updated_at, :utc_datetime_usec)
 
+      # Device authorization (context "device"). See docs/device_flow.md.
+      # user_code is the SHA-256 of the canonical user code. status is
+      # pending, approved, or denied. interval is the poll spacing in seconds.
+      add(:user_code, :binary)
+      add(:status, :string)
+      add(:interval, :integer)
+
       timestamps(type: :utc_datetime, updated_at: false)
     end
 
     create(index(:users_tokens, [:user_id]))
     create(unique_index(:users_tokens, [:context, :token]))
+    create(unique_index(:users_tokens, [:user_code]))
 
     create table(:tenants, primary_key: false) do
       add(:id, :binary_id, primary_key: true)
