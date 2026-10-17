@@ -34,7 +34,7 @@ Both codes are returned once, in plaintext. The database stores SHA-256. Lookups
 
 Success mints a user API key through `AuthKit.ApiKey.create_api_key/2` and deletes the device row in the same transaction. The CLI stores that key. `plug AuthKit.Auth.Bearer` already accepts it as `Authorization: Bearer <key>` or `x-api-key: <key>`. `AuthKit.Device.credential_headers/1` builds both. The key is not a base64 session token. Session tokens are for browsers. A CLI key is long-lived, listed, and revoked with the API-key functions without signing the user out of the browser. The default key does not expire. Set `api_key_expires_in` or the API key `:default_expires_in` when it should.
 
-`change_password` and `reset_password` delete every token for the user, including API keys issued by this flow.
+`change_password` and `reset_password` delete every credential token for the user, including sessions, device grants, and API keys issued by this flow. They leave the per-user `device_attempt` counter in place.
 
 ## Names
 
@@ -263,6 +263,8 @@ A scope longer than 255 bytes is `:invalid_request`. The same byte ceiling appli
 The default user code is 8 characters from a 32-symbol alphabet, 40 bits. Guessing it and approving would hand the device an API key for the attacker's account.
 
 Misses are counted for `expires_in` seconds (default 1800). `AuthKit.Device.max_user_code_attempts/0` is that user's cap for one window. At the default length the cap is 128. A code can overlap two windows, so the most guesses one user can make against it is 256, the RFC's `2^-32` budget for a 40-bit code (`2^(40 - 32)`). Length 7 is 35 bits and allows 4 guesses per window, 8 across a boundary, which is also `2^-32`. `:user_code_length` below 7 is refused and the default 8 is used. Those lengths miss the bar.
+
+That 256 ceiling holds through password change, password reset, and email confirmation. Those flows expire sessions, device grants, API keys, and other credential tokens, and they do not delete the `device_attempt` row, so they cannot start the count over inside one code's lifetime. The count resets only when that row's window ends. Deleting the user still removes the row, through the `user_id` foreign key.
 
 Each user has one `users_tokens` row with context `"device_attempt"`. `user_id` is that authenticated user. `token` is a digest of the user id, so the existing `(context, token)` unique index keeps the rows apart. `interval` on that row is the miss count. It is not a grant and not an API key. The increment is a single `UPDATE ... WHERE interval < max` on that user's row, so concurrent guesses from the same user cannot all pass. A lookup that finds a grant releases the slot. Only misses spend the budget. There is no shared counter.
 

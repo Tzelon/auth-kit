@@ -288,10 +288,11 @@ defmodule AuthKit.Auth do
   Changes the password of a signed-in user.
 
   Checks `current_password` with `valid_password?/2`, stores the new one on
-  the credential identity, and expires every other token. Pass the current
-  session as `:except_token` so that session stays valid.
+  the credential identity, and expires every other credential token. Pass
+  the current session as `:except_token` so that session stays valid.
+  The device-authorization attempt counter (`"device_attempt"`) is kept.
   `update_user_and_delete_all_tokens/2` cannot do this: it deletes every
-  token, including the one for this request.
+  credential token, including the one for this request.
   """
   def change_password(user, current_password, new_password, opts \\ [])
       when is_struct(user, @user) do
@@ -319,9 +320,10 @@ defmodule AuthKit.Auth do
   Sets a new password from a `"reset_password"` token.
 
   The reset proves the user owns the email, so the email is confirmed.
-  Every token is expired. On an unconfirmed account `confirm_user_email/1`
-  removes the old password first; the password from this reset is the one
-  that remains.
+  Every credential token is expired. The device-authorization attempt
+  counter (`"device_attempt"`) is kept. On an unconfirmed account
+  `confirm_user_email/1` removes the old password first; the password from
+  this reset is the one that remains.
   """
   def reset_password(token, password) when is_binary(password) do
     with {:ok, query} <- UserToken.verify_email_token_query(token, "reset_password"),
@@ -344,8 +346,9 @@ defmodule AuthKit.Auth do
 
   Password sign-up does not verify the email, so on an unconfirmed
   account the password may have been set by someone else. Confirming
-  removes the password identity and expires all tokens, including
-  sessions. Already confirmed users are returned unchanged.
+  removes the password identity and expires credential tokens, including
+  sessions. The device-authorization attempt counter (`"device_attempt"`)
+  is kept. Already confirmed users are returned unchanged.
   """
   def confirm_user_email(%{email_confirmed_at: nil} = user) when is_struct(user, @user) do
     now = DateTime.utc_now() |> DateTime.truncate(:second)
@@ -429,7 +432,11 @@ defmodule AuthKit.Auth do
   ## Token helper
 
   @doc """
-  Updates the user and deletes all their tokens in one transaction.
+  Updates the user and deletes their credential tokens in one transaction.
+
+  The device-authorization attempt counter (`"device_attempt"`) is
+  rate-limit bookkeeping, not a credential, and is not deleted. Deleting
+  the user still removes it through the `user_id` foreign key.
 
   ## Options
 
@@ -442,7 +449,7 @@ defmodule AuthKit.Auth do
     with {:ok, %{user: user, tokens_to_expire: expired_tokens}} <-
            Ecto.Multi.new()
            |> Ecto.Multi.update(:user, changeset)
-           |> Ecto.Multi.all(:tokens_to_expire, UserToken.by_user_and_contexts_query(user, :all))
+           |> Ecto.Multi.all(:tokens_to_expire, tokens_to_expire_query(user, nil))
            |> Ecto.Multi.delete_all(:tokens, fn %{tokens_to_expire: tokens_to_expire} ->
              UserToken.delete_all_query(tokens_to_expire)
            end)
@@ -482,20 +489,26 @@ defmodule AuthKit.Auth do
   end
 
   defp expire_user_tokens(user, opts \\ []) do
-    except = Keyword.get(opts, :except_token)
+    Repo.delete_all(tokens_to_expire_query(user, Keyword.get(opts, :except_token)))
+  end
 
+  # Credential rows only. `"device_attempt"` is the per-user user-code
+  # miss counter. Deleting it here would let the signed-in account refill
+  # its own guessing budget by changing or resetting its password, or by
+  # confirming its email. The window expiry path is the reset that remains.
+  # Account deletion still removes the row through the user foreign key.
+  defp tokens_to_expire_query(user, except) do
     query =
-      case except do
-        nil ->
-          UserToken.by_user_and_contexts_query(user, :all)
+      from t in AuthKit.Config.user_token_schema(),
+        where: t.user_id == ^user.id and t.context != "device_attempt"
 
-        token ->
-          from t in AuthKit.Config.user_token_schema(),
-            where: t.user_id == ^user.id,
-            where: t.context != "session" or t.token != ^token
-      end
+    case except do
+      nil ->
+        query
 
-    Repo.delete_all(query)
+      token ->
+        from t in query, where: t.context != "session" or t.token != ^token
+    end
   end
 
   defp maybe_delete_password(multi, user, opts) do

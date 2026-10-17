@@ -80,13 +80,15 @@ end
 Password sign-up accepts `send_confirm_email: fn token -> ... end`.
 `AuthKit.Auth.SignUp.confirm_email/2` checks that `"confirm"` token and calls
 `AuthKit.Auth.confirm_user_email/1`. On an account that was not yet confirmed
-this removes the password and every token, then starts a new session.
+this removes the password and every credential token, then starts a new session.
+The device-authorization attempt counter is left in place.
 
 `AuthKit.Auth.SignIn.request_password_reset/3` accepts
 `send_reset_password: fn token -> ... end`. `reset_password/2` stores the new
-password, expires every token, and confirms the email. `change_password/2`
-checks the current password, updates the credential, and expires every token
-except the session making the request.
+password, expires every credential token, and confirms the email. `change_password/2`
+checks the current password, updates the credential, and expires every credential
+token except the session making the request. Neither clears the device-authorization
+attempt counter.
 
 ## Tenants
 

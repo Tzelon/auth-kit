@@ -1085,7 +1085,9 @@ defmodule AuthKit.Device do
   # that finds a grant releases the slot, so only misses spend the budget.
   # The window is `expires_in`, the same lifetime as a code.
   # `max_user_code_attempts/0` is half of the RFC 8628 §5.1 budget because
-  # a code can straddle two windows.
+  # a code can straddle two windows. Password change, password reset, and
+  # email confirmation do not delete this row. `reset_attempt_window/2`
+  # is the only reset.
   defp reserve_attempt(user), do: reserve_attempt(user, 2)
 
   defp reserve_attempt(user, retries) do
@@ -1204,7 +1206,8 @@ defmodule AuthKit.Device do
   Length 7 is 35 bits: 4 failures in one window and 8 across a boundary,
   which is `2^-32`. The default length 8 is 40 bits: 128 failures per
   window and 256 across a boundary. Lengths below 7 miss that bar and are
-  not used.
+  not used. Password change, password reset, and email confirmation do
+  not clear the counter, so they do not open another window.
   """
   def max_user_code_attempts do
     exponent = user_code_length() * 5 - 33

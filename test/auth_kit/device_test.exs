@@ -460,6 +460,104 @@ defmodule AuthKit.DeviceTest do
     end)
   end
 
+  test "password change keeps an exhausted attempt counter and drops credential tokens" do
+    {user, password} = Fixtures.confirmed_user_with_password_fixture()
+    other = Fixtures.user_fixture()
+
+    with_device_config([user_code_length: 7], fn ->
+      {:ok, issued} = Auth.request_device_authorization(client_id: "demo-cli")
+      assert {:ok, _} = Auth.approve_device_authorization(user, issued.user_code)
+
+      session = Auth.generate_session_token(user)
+      other_session = Auth.generate_session_token(user)
+      reset = Auth.generate_email_token(user, "reset_password")
+      assert {:ok, api_key} = Auth.create_api_key(user, name: "cli")
+
+      limit = exhaust_user_code_attempts!(user)
+      assert attempt_row!(user).interval == limit
+
+      assert {:error, :invalid_grant} = Auth.get_device_authorization(other, "AAAAAAA")
+      other_attempt = attempt_row!(other)
+
+      assert {:ok, _} =
+               Auth.change_password(user, password, "newpassword1", except_token: session)
+
+      assert {:error, :too_many_attempts} = Auth.get_device_authorization(user, "CCCCCCC")
+      assert attempt_row!(user).interval == limit
+
+      assert Auth.fetch_user_by_session_token(session).id == user.id
+      refute Auth.fetch_user_by_session_token(other_session)
+      assert {:ok, query} = AuthKit.UserToken.verify_email_token_query(reset, "reset_password")
+      refute Repo.one(query)
+      assert %{valid: false} = Auth.verify_api_key(api_key.key)
+      refute device_row(issued.device_code)
+      assert {:error, :invalid_grant} = poll(issued.device_code)
+      assert {:ok, %{api_keys: [], total: 0}} = Auth.list_api_keys(user)
+
+      assert Repo.get!(UserToken, other_attempt.id).interval == other_attempt.interval
+    end)
+  end
+
+  test "password reset keeps an exhausted attempt counter and drops credential tokens" do
+    {user, _password} = Fixtures.user_with_password_fixture()
+
+    with_device_config([user_code_length: 7], fn ->
+      {:ok, issued} = Auth.request_device_authorization(client_id: "demo-cli")
+      assert {:ok, _} = Auth.approve_device_authorization(user, issued.user_code)
+
+      session = Auth.generate_session_token(user)
+      assert {:ok, api_key} = Auth.create_api_key(user, name: "cli")
+      limit = exhaust_user_code_attempts!(user)
+      token = Auth.generate_email_token(user, "reset_password")
+
+      assert {:ok, reset_user} = Auth.reset_password(token, "newpassword1")
+      assert reset_user.email_confirmed_at
+
+      assert {:error, :too_many_attempts} = Auth.get_device_authorization(user, "CCCCCCC")
+      assert attempt_row!(user).interval == limit
+
+      refute Auth.fetch_user_by_session_token(session)
+      assert %{valid: false} = Auth.verify_api_key(api_key.key)
+      refute device_row(issued.device_code)
+      assert {:error, :invalid_grant} = poll(issued.device_code)
+    end)
+  end
+
+  test "email confirmation keeps an exhausted attempt counter and drops the session" do
+    user = Fixtures.user_fixture()
+    session = Auth.generate_session_token(user)
+
+    with_device_config([user_code_length: 7], fn ->
+      limit = exhaust_user_code_attempts!(user)
+
+      assert {:ok, confirmed, expired} = Auth.confirm_user_email(user)
+      assert confirmed.email_confirmed_at
+      assert Enum.any?(expired, &(&1.context == "session"))
+      refute Enum.any?(expired, &(&1.context == "device_attempt"))
+      refute Auth.fetch_user_by_session_token(session)
+
+      assert {:error, :too_many_attempts} = Auth.get_device_authorization(user, "CCCCCCC")
+      assert attempt_row!(user).interval == limit
+    end)
+  end
+
+  test "deleting a user removes that user's device attempt row" do
+    user = Fixtures.user_fixture()
+    other = Fixtures.user_fixture()
+
+    with_device_config([user_code_length: 7], fn ->
+      assert {:error, :invalid_grant} = Auth.get_device_authorization(user, "AAAAAAA")
+      assert {:error, :invalid_grant} = Auth.get_device_authorization(other, "AAAAAAA")
+      assert attempt_row!(user)
+      other_attempt = attempt_row!(other)
+
+      Repo.delete!(user)
+
+      refute Repo.get_by(UserToken, context: "device_attempt", user_id: user.id)
+      assert Repo.get!(UserToken, other_attempt.id).user_id == other.id
+    end)
+  end
+
   test "a 300-character scope is invalid_request" do
     assert {:error, :invalid_request} =
              Auth.request_device_authorization(
@@ -587,6 +685,22 @@ defmodule AuthKit.DeviceTest do
     end)
 
     assert {:ok, %{api_keys: [], total: 0}} = Auth.list_api_keys(user)
+  end
+
+  defp exhaust_user_code_attempts!(user) do
+    limit = Device.max_user_code_attempts()
+
+    for _ <- 1..limit do
+      assert {:error, :invalid_grant} = Auth.get_device_authorization(user, "AAAAAAA")
+    end
+
+    assert {:error, :too_many_attempts} = Auth.get_device_authorization(user, "BBBBBBB")
+    limit
+  end
+
+  defp attempt_row!(user) do
+    Repo.get_by(UserToken, context: "device_attempt", user_id: user.id) ||
+      flunk("device attempt row missing")
   end
 
   defp poll(device_code) do
