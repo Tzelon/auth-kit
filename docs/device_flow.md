@@ -20,7 +20,7 @@ Columns already on the table, reused:
 | --- | --- |
 | `token` | SHA-256 of the device code. The existing `(context, token)` unique index is the lookup. |
 | `name` | Client id, shown on the approval page. |
-| `sent_to` | Optional scope string, at most 255 characters. Display-only. Not enforced on the issued API key. |
+| `sent_to` | Optional scope string, at most 255 bytes. Display-only. Not enforced on the issued API key. |
 | `user_id` | Approving user. Null while pending, unless the code was pre-bound. |
 | `active_tenant_id` | Tenant passed to approve. The issued API key is scoped to it. |
 | `tenant_scoped` | True when approval stored a tenant. |
@@ -173,7 +173,7 @@ end
 
 If the view includes `scope`, show it as informational text only. Approving does not restrict the API key to that scope. The key is a full credential for the signed-in user. When approve is called with `tenant_id:`, the key is also scoped to that tenant. Do not present `scope` as the consent boundary. `code_body/1` is only for the code response (`device_code`, `user_code`, and the URIs). The approval page uses `approval_body/1`.
 
-`:too_many_attempts` means the user-code attempt budget is spent. Answer `429` and ask the user to wait. The grant itself is unchanged.
+`:too_many_attempts` means that signed-in user's user-code attempt budget is spent. Answer `429` and ask the user to wait. The grant itself is unchanged, and other users keep their own budgets.
 
 The approval page can read `user_code` from the query string. `verification_uri_complete` is that URL.
 
@@ -221,7 +221,7 @@ end
 
 `user_id:` on the code request pre-binds the grant. Only that user can approve or deny it. Pass it from the server, not from the device.
 
-A missing client id is `:invalid_request`. A client id outside `allowed_clients` is `:invalid_client`. A poll whose client id does not match the one stored on the grant is `:invalid_grant`. A wrong `grant_type` is `:unsupported_grant_type`. A scope longer than 255 characters is `:invalid_request`.
+A missing client id is `:invalid_request`. A client id outside `allowed_clients` is `:invalid_client`. A poll whose client id does not match the one stored on the grant is `:invalid_grant`. A wrong `grant_type` is `:unsupported_grant_type`. A scope or client id whose UTF-8 encoding is longer than 255 bytes is `:invalid_request`.
 
 Denying a grant that is already approved, and has not been polled, marks it denied when the approving user denies it. The poll then returns `:access_denied` and no key is issued. If issuing the key fails because the member was removed, the user is gone, or the API key settings are invalid, the grant is deleted in that transaction. A later poll does not mint a key.
 
@@ -246,7 +246,7 @@ config :auth_kit,
 
 `:verification_uri` is returned as `verification_uri`. It can be a path (`"/device"`) or an absolute URL. `:verification_uri_complete` defaults to true and sets `user_code` as a query parameter, including when `:verification_uri` already has a query string or a `#` fragment. The code is never placed in the fragment. Set `:verification_uri_complete` to false to omit that field.
 
-`:expires_in` is the code lifetime in seconds. Default `1800` (30 minutes). `:interval` is the starting poll spacing in seconds. Default `5`. Minimum `1`. After `slow_down` the stored interval increases by 5, up to 300. `:user_code_length` defaults to 8 and must be from 4 to 32.
+`:expires_in` is the code lifetime in seconds. Default `1800` (30 minutes). `:interval` is the starting poll spacing in seconds. Default `5`. Minimum `1`. After `slow_down` the stored interval increases by 5, up to 300. `:user_code_length` defaults to 8 and must be an integer from 7 to 32. Length 7 is the shortest code that still meets the `2^-32` guessing bound. A length below 7 is refused and the default 8 is used.
 
 `:allowed_clients` is nil (any client id), a list of ids, or `fn client_id -> boolean end`. Set it in production.
 
@@ -254,17 +254,19 @@ config :auth_kit,
 
 These three settings are checked when the code is requested. A name longer than the API key maximum, a prefix the API key validator rejects, or an `api_key_expires_in` outside the allowed range makes `request_device_authorization/1` return `:server_error` and no grant is stored. If the setting is changed after a grant is already approved, the poll returns `:server_error` and deletes the grant. A later poll is `:invalid_grant` and does not mint a key.
 
-A scope longer than 255 characters is `:invalid_request`. `sent_to` is a string column (`varchar(255)` on PostgreSQL).
+A scope longer than 255 bytes is `:invalid_request`. The same byte ceiling applies to `client_id`, which is stored in `name`. Both columns are strings (`varchar(255)` on PostgreSQL). That type counts characters. A grapheme can be several characters (a combining mark, or an emoji joined by zero-width joiners), so the check uses bytes. A UTF-8 string of 255 bytes is at most 255 characters, and a value the check accepts cannot overflow the column. A 255-byte ASCII scope is stored. A 255-grapheme string of combining marks is `:invalid_request`.
 
 ## User-code attempts
 
-`get_device_authorization/2`, `approve_device_authorization/3`, and `deny_device_authorization/2` share one failed-attempt counter (RFC 8628 §5.1). The default user code is 8 characters from a 32-symbol alphabet, 40 bits. Guessing it and approving would hand the device an API key for the attacker's account.
+`get_device_authorization/2`, `approve_device_authorization/3`, and `deny_device_authorization/2` each spend from the signed-in user's failed-attempt budget (RFC 8628 §5.1). The caller is already authenticated. The budget is that user's alone. One account exhausting its guesses cannot lock out anyone else, and it cannot freeze approval for the deployment.
 
-Misses are counted for `expires_in` seconds (default 1800). `AuthKit.Device.max_user_code_attempts/0` is the cap for one window. At the default length that cap is 128. A code can overlap two windows, so the most guesses it can face is 256, the RFC's `2^-32` budget for a 40-bit code (`2^(40 - 32)`). A shorter `user_code_length` lowers the cap. Below 8 characters the code has fewer than 40 bits, the cap stays at least 1, and it cannot reach `2^-32`.
+The default user code is 8 characters from a 32-symbol alphabet, 40 bits. Guessing it and approving would hand the device an API key for the attacker's account.
 
-The counter is one `users_tokens` row with context `"device_attempt"`. `interval` on that row is the miss count. It is not a grant and not an API key. The increment is a single `UPDATE ... WHERE interval < max`, so concurrent guesses cannot all pass. A lookup that finds a grant releases the slot. Only misses spend the budget.
+Misses are counted for `expires_in` seconds (default 1800). `AuthKit.Device.max_user_code_attempts/0` is that user's cap for one window. At the default length the cap is 128. A code can overlap two windows, so the most guesses one user can make against it is 256, the RFC's `2^-32` budget for a 40-bit code (`2^(40 - 32)`). Length 7 is 35 bits and allows 4 guesses per window, 8 across a boundary, which is also `2^-32`. `:user_code_length` below 7 is refused and the default 8 is used. Those lengths miss the bar.
 
-When the cap is reached, those three calls return `{:error, :too_many_attempts}` until the window ends, including for the real code. The grant stays as it was. Polling is not part of this counter. `slow_down` still spaces polls of a pending grant.
+Each user has one `users_tokens` row with context `"device_attempt"`. `user_id` is that authenticated user. `token` is a digest of the user id, so the existing `(context, token)` unique index keeps the rows apart. `interval` on that row is the miss count. It is not a grant and not an API key. The increment is a single `UPDATE ... WHERE interval < max` on that user's row, so concurrent guesses from the same user cannot all pass. A lookup that finds a grant releases the slot. Only misses spend the budget. There is no shared counter.
+
+When that user's cap is reached, those three calls return `{:error, :too_many_attempts}` for that user until their window ends, including when they submit a real code. Other users still use their own budgets, including to read or approve that same code. The grant stays as it was. Polling is not part of this counter. `slow_down` still spaces polls of a pending grant.
 
 ## CLI
 

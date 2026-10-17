@@ -373,7 +373,9 @@ defmodule AuthKit.DeviceTest do
       past = DateTime.add(DateTime.utc_now(), -5, :second)
 
       {1, _} =
-        from(t in UserToken, where: t.context == "device_attempt")
+        from(t in UserToken,
+          where: t.context == "device_attempt" and t.user_id == ^user.id
+        )
         |> Repo.update_all(set: [expires_at: past])
 
       assert {:ok, %{status: "pending"}} =
@@ -414,6 +416,50 @@ defmodule AuthKit.DeviceTest do
     end)
   end
 
+  test "one user's exhausted attempt budget does not lock out another user" do
+    user_a = Fixtures.user_fixture()
+    user_b = Fixtures.user_fixture()
+
+    with_device_config([user_code_length: 7], fn ->
+      limit = Device.max_user_code_attempts()
+      {:ok, issued_a} = Auth.request_device_authorization(client_id: "demo-cli")
+      {:ok, issued_b} = Auth.request_device_authorization(client_id: "demo-cli")
+
+      for _ <- 1..limit do
+        assert {:error, :invalid_grant} = Auth.get_device_authorization(user_a, "AAAAAAA")
+      end
+
+      assert {:error, :too_many_attempts} =
+               Auth.get_device_authorization(user_a, "BBBBBBB")
+
+      # A spent A's budget, so A cannot submit A's real code until the window ends.
+      # B's budget is separate: B's code and A's code both still load.
+      assert {:error, :too_many_attempts} =
+               Auth.approve_device_authorization(user_a, issued_a.user_code)
+
+      assert {:ok, %{status: "pending"}} =
+               Auth.get_device_authorization(user_b, issued_b.user_code)
+
+      assert {:ok, %{status: "pending"}} =
+               Auth.get_device_authorization(user_b, issued_a.user_code)
+
+      assert {:ok, %{status: "approved"}} =
+               Auth.approve_device_authorization(user_b, issued_a.user_code)
+
+      assert device_row!(issued_a.device_code).status == "approved"
+      assert device_row!(issued_b.device_code).status == "pending"
+
+      user_ids =
+        UserToken
+        |> where([t], t.context == "device_attempt")
+        |> select([t], t.user_id)
+        |> Repo.all()
+        |> Enum.sort()
+
+      assert user_ids == Enum.sort([user_a.id, user_b.id])
+    end)
+  end
+
   test "a 300-character scope is invalid_request" do
     assert {:error, :invalid_request} =
              Auth.request_device_authorization(
@@ -433,6 +479,57 @@ defmodule AuthKit.DeviceTest do
              Auth.request_device_authorization(client_id: "demo-cli", scope: scope)
 
     assert device_row!(issued.device_code).sent_to == scope
+  end
+
+  test "a 255-grapheme combining-mark scope and an overlong emoji client id are invalid_request" do
+    # SQLite does not enforce varchar(255). These strings pass a grapheme
+    # count and would raise `value too long` on PostgreSQL, so the assertion
+    # is on validation, before insert.
+    scope = String.duplicate("e\u0301", 255)
+    assert String.length(scope) == 255
+    assert byte_size(scope) > 255
+    assert length(String.codepoints(scope)) > 255
+
+    before = Repo.aggregate(UserToken, :count, :id)
+
+    assert {:error, :invalid_request} =
+             Auth.request_device_authorization(client_id: "demo-cli", scope: scope)
+
+    # One family emoji is one grapheme and several characters. Forty stay
+    # inside the 191-grapheme client-id cap and past varchar(255).
+    client_id = String.duplicate("👨‍👩‍👧‍👦", 40)
+    assert String.length(client_id) in 1..191
+    assert byte_size(client_id) > 255
+    assert length(String.codepoints(client_id)) > 255
+    assert String.printable?(client_id)
+
+    assert {:error, :invalid_request} =
+             Auth.request_device_authorization(client_id: client_id)
+
+    assert Repo.aggregate(UserToken, :count, :id) == before
+
+    assert {:ok, issued} = Auth.request_device_authorization(client_id: "cli-😀")
+    assert device_row!(issued.device_code).name == "cli-😀"
+  end
+
+  test "user_code_length below 7 is refused and falls back to 8" do
+    for length <- [4, 5, 6] do
+      with_device_config([user_code_length: length], fn ->
+        assert Device.max_user_code_attempts() == 128
+
+        {:ok, issued} = Auth.request_device_authorization(client_id: "demo-cli")
+        canonical = String.replace(issued.user_code, "-", "")
+        assert String.length(canonical) == 8
+      end)
+    end
+
+    with_device_config([user_code_length: 7], fn ->
+      assert Device.max_user_code_attempts() == 4
+
+      {:ok, issued} = Auth.request_device_authorization(client_id: "demo-cli")
+      canonical = String.replace(issued.user_code, "-", "")
+      assert String.length(canonical) == 7
+    end)
   end
 
   test "verification_uri_complete keeps user_code in the query, not the fragment" do
@@ -476,6 +573,15 @@ defmodule AuthKit.DeviceTest do
 
     with_device_config([api_key_name: String.duplicate("n", 40)], fn ->
       assert {:error, :server_error} = poll(issued.device_code)
+
+      token_error = Device.token_body({:error, :server_error})
+      assert token_error["error"] == "server_error"
+      assert token_error["error_description"] == "The access token could not be issued."
+      refute token_error["error_description"] =~ "device code"
+
+      assert Device.code_body({:error, :server_error})["error_description"] ==
+               "The device code could not be issued."
+
       refute device_row(issued.device_code)
       assert {:error, :invalid_grant} = poll(issued.device_code)
     end)

@@ -43,9 +43,10 @@ defmodule AuthKit.Device do
   credential for the approving user, and for the tenant when approval
   passed `tenant_id:`.
 
-  Failed user-code lookups share one counter (RFC 8628 §5.1). The window
-  is `expires_in`. Past the budget, the approval calls return
-  `:too_many_attempts` until the window ends. See
+  Failed user-code lookups are counted per authenticated user (RFC 8628
+  §5.1). The window is `expires_in`. Past that user's budget, their
+  approval calls return `:too_many_attempts` until the window ends.
+  Another account has its own budget and is not locked out. See
   `max_user_code_attempts/0`.
 
   `AuthKit.Auth` defines the same calls as this module.
@@ -73,9 +74,15 @@ defmodule AuthKit.Device do
   @default_expires_in 1800
   @default_interval 5
   @default_user_code_length 8
+  # Length 7 is the shortest code that still meets the advertised 2^-32 bar.
+  # Lengths 4–6 are refused in `user_code_length/0` and fall back to 8.
+  @min_user_code_length 7
+  @max_user_code_length 32
   @max_client_id 191
-  # `sent_to` is an Ecto `:string`, which PostgreSQL stores as varchar(255).
-  @max_scope 255
+  # `name` and `sent_to` are Ecto `:string` columns. PostgreSQL stores those
+  # as varchar(255) and counts characters, not graphemes. UTF-8 uses at least
+  # one byte per character, so a 255-byte ceiling cannot exceed the column.
+  @max_varchar 255
   @attempt_context "device_attempt"
   # Half of 2^(entropy - 32). A code can sit in two adjacent windows.
   # Capped so the counter fits in a 32-bit integer column.
@@ -99,6 +106,10 @@ defmodule AuthKit.Device do
     not_found: "The tenant was not found.",
     too_many_attempts: "Too many incorrect user-code attempts. Try again later."
   }
+
+  # Poll `:server_error` is not "the device code could not be issued":
+  # the code was issued, and the access token was not.
+  @token_server_error "The access token could not be issued."
 
   @dummy_hash :crypto.hash(:sha256, "auth-kit-device-dummy")
 
@@ -148,11 +159,19 @@ defmodule AuthKit.Device do
   `scope` is the display string from the grant. The API key does not
   enforce it. The API key id stays on the Elixir result (`:api_key_id`)
   and is left out of this body. Errors use `error` and `error_description`.
+
+  `:server_error` here means the access token could not be issued. The
+  device code was already issued. `code_body/1` keeps the device-code
+  wording for that same atom.
   """
   def token_body({:ok, result}) do
     %{"access_token" => result.access_token, "token_type" => result.token_type}
     |> maybe_put("expires_in", result.expires_in)
     |> maybe_put("scope", result.scope)
+  end
+
+  def token_body({:error, :server_error}) do
+    %{"error" => "server_error", "error_description" => @token_server_error}
   end
 
   def token_body({:error, reason}) when is_atom(reason), do: error_body(reason)
@@ -210,7 +229,7 @@ defmodule AuthKit.Device do
     * `:client_id` — required client identifier, stored for the approval page
     * `:scope` — optional display string, shown on the approval page and
       echoed on the token response. Not enforced on the API key. At most
-      255 characters.
+      255 bytes, so it fits a `varchar(255)` column.
     * `:user_id` — pre-bind the grant so only that user can approve or deny it
   """
   def request_device_authorization(opts \\ [])
@@ -409,8 +428,31 @@ defmodule AuthKit.Device do
           if conflict?(changeset), do: {:error, :conflict}, else: {:error, changeset}
       end
     rescue
-      Ecto.ConstraintError -> {:error, :conflict}
+      Ecto.ConstraintError ->
+        {:error, :conflict}
+
+      exception ->
+        if value_too_long?(exception) do
+          {:error, :invalid_request}
+        else
+          reraise exception, __STACKTRACE__
+        end
     end
+  end
+
+  # varchar overflow is not an Ecto constraint. PostgreSQL raises
+  # `string_data_right_truncation` (SQLSTATE 22001). MySQL raises
+  # ER_DATA_TOO_LONG (1406). Callers should reject these strings first.
+  defp value_too_long?(%{postgres: %{code: :string_data_right_truncation}}), do: true
+  defp value_too_long?(%{postgres: %{pg_code: "22001"}}), do: true
+  defp value_too_long?(%{mysql: %{code: 1406}}), do: true
+
+  defp value_too_long?(exception) do
+    message = Exception.message(exception)
+
+    String.contains?(message, "value too long") or
+      String.contains?(message, "string_data_right_truncation") or
+      String.contains?(message, "Data too long")
   end
 
   defp conflict?(changeset) do
@@ -988,9 +1030,8 @@ defmodule AuthKit.Device do
   end
 
   defp valid_client_id?(id) when is_binary(id) do
-    length = String.length(id)
-
-    length in 1..@max_client_id and String.printable?(id) and
+    String.valid?(id) and byte_size(id) in 1..@max_varchar and
+      String.length(id) in 1..@max_client_id and String.printable?(id) and
       not Regex.match?(~r/\s/, id)
   end
 
@@ -1020,10 +1061,10 @@ defmodule AuthKit.Device do
 
     with :ok <- ensure_user(user),
          {:ok, canonical} <- normalize_user_code(user_code),
-         :ok <- reserve_attempt() do
+         :ok <- reserve_attempt(user) do
       case fetch_user_code(canonical) do
         token when not is_nil(token) ->
-          release_attempt()
+          release_attempt(user)
           fun.(token)
 
         _missing ->
@@ -1036,29 +1077,32 @@ defmodule AuthKit.Device do
     end
   end
 
-  # One row, context "device_attempt", holds the failed-guess count in
-  # `interval`. The UPDATE ... WHERE interval < max is the lock: concurrent
-  # guesses cannot all pass the check. A lookup that finds a grant releases
-  # the slot, so only misses spend the budget. The window is `expires_in`,
-  # the same lifetime as a code. `max_user_code_attempts/0` is half of the
-  # RFC 8628 §5.1 budget because a code can straddle two windows.
-  defp reserve_attempt, do: reserve_attempt(2)
+  # One `device_attempt` row per authenticated user holds that user's
+  # failed-guess count in `interval`. The row is keyed by the user id
+  # (`user_id`, and a digest of that id in `token`), so one account cannot
+  # spend another account's budget. The UPDATE ... WHERE interval < max is
+  # the lock: concurrent guesses from that user cannot all pass. A lookup
+  # that finds a grant releases the slot, so only misses spend the budget.
+  # The window is `expires_in`, the same lifetime as a code.
+  # `max_user_code_attempts/0` is half of the RFC 8628 §5.1 budget because
+  # a code can straddle two windows.
+  defp reserve_attempt(user), do: reserve_attempt(user, 2)
 
-  defp reserve_attempt(retries) do
+  defp reserve_attempt(user, retries) do
     now = DateTime.utc_now()
 
-    with :ok <- ensure_attempt_counter(now) do
+    with :ok <- ensure_attempt_counter(user, now) do
       cond do
-        take_attempt_slot(now) -> :ok
-        reset_attempt_window(now) -> :ok
-        retries > 0 -> reserve_attempt(retries - 1)
+        take_attempt_slot(user, now) -> :ok
+        reset_attempt_window(user, now) -> :ok
+        retries > 0 -> reserve_attempt(user, retries - 1)
         true -> :locked
       end
     end
   end
 
-  defp ensure_attempt_counter(now) do
-    token = attempt_token()
+  defp ensure_attempt_counter(user, now) do
+    token = attempt_token(user.id)
 
     exists? =
       Repo.exists?(
@@ -1074,6 +1118,7 @@ defmodule AuthKit.Device do
         context: @attempt_context,
         status: "open",
         interval: 0,
+        user_id: user.id,
         expires_at: DateTime.add(now, attempt_window(), :second),
         tenant_scoped: false,
         updated_at: now
@@ -1087,27 +1132,29 @@ defmodule AuthKit.Device do
     end
   end
 
-  defp take_attempt_slot(now) do
+  defp take_attempt_slot(user, now) do
     max = max_user_code_attempts()
+    token = attempt_token(user.id)
 
     {count, _} =
       from(t in schema(),
         where:
-          t.context == ^@attempt_context and t.token == ^attempt_token() and t.interval < ^max and
-            t.expires_at > ^now
+          t.context == ^@attempt_context and t.token == ^token and t.user_id == ^user.id and
+            t.interval < ^max and t.expires_at > ^now
       )
       |> Repo.update_all(inc: [interval: 1], set: [updated_at: now])
 
     count == 1
   end
 
-  defp reset_attempt_window(now) do
+  defp reset_attempt_window(user, now) do
+    token = attempt_token(user.id)
     window_end = DateTime.add(now, attempt_window(), :second)
 
     {count, _} =
       from(t in schema(),
         where:
-          t.context == ^@attempt_context and t.token == ^attempt_token() and
+          t.context == ^@attempt_context and t.token == ^token and t.user_id == ^user.id and
             not is_nil(t.expires_at) and t.expires_at <= ^now
       )
       |> Repo.update_all(set: [interval: 1, expires_at: window_end, updated_at: now])
@@ -1115,33 +1162,49 @@ defmodule AuthKit.Device do
     count == 1
   end
 
-  defp release_attempt do
+  defp release_attempt(user) do
     now = DateTime.utc_now()
+    token = attempt_token(user.id)
 
     from(t in schema(),
       where:
-        t.context == ^@attempt_context and t.token == ^attempt_token() and t.interval > 0 and
-          t.expires_at > ^now
+        t.context == ^@attempt_context and t.token == ^token and t.user_id == ^user.id and
+          t.interval > 0 and t.expires_at > ^now
     )
     |> Repo.update_all(inc: [interval: -1], set: [updated_at: now])
 
     :ok
   end
 
-  defp attempt_token, do: hash("auth-kit-device-user-code-attempts")
+  defp attempt_token(user_id), do: hash(attempt_material(user_id))
+
+  defp attempt_material(user_id) when is_integer(user_id) do
+    "auth-kit-device-user-code-attempts:i:" <> Integer.to_string(user_id)
+  end
+
+  defp attempt_material(user_id) when is_binary(user_id) do
+    "auth-kit-device-user-code-attempts:b:" <> user_id
+  end
+
+  defp attempt_material(user_id) do
+    "auth-kit-device-user-code-attempts:t:" <> :erlang.term_to_binary(user_id)
+  end
 
   defp attempt_window, do: expires_in()
 
   @doc """
   Failed user-code guesses allowed in one attempt window.
 
-  The window is `expires_in` seconds. The user code alphabet has 32
-  symbols, 5 bits each. RFC 8628 §5.1 keeps the chance of guessing a code
-  during its life near `2^-32`, a budget of `2^(entropy - 32)` guesses.
-  A code can overlap two windows, so each window allows half of that.
-  `user_code_length` below 8 has fewer than 40 bits. The floor is 1, and
-  that length cannot reach `2^-32`. The default length 8 allows 128
-  failures per window, 256 across a boundary.
+  The window is `expires_in` seconds, and the budget belongs to one
+  authenticated user. The user code alphabet has 32 symbols, 5 bits each.
+  RFC 8628 §5.1 keeps the chance that one user guesses a code during its
+  life near `2^-32`, a budget of `2^(entropy - 32)` guesses. A code can
+  overlap two windows, so each window allows half of that.
+
+  Length 7 is 35 bits: 4 failures in one window and 8 across a boundary,
+  which is `2^-32`. The default length 8 is 40 bits: 128 failures per
+  window and 256 across a boundary. Lengths below 7 miss that bar and are
+  not used.
   """
   def max_user_code_attempts do
     exponent = user_code_length() * 5 - 33
@@ -1171,13 +1234,17 @@ defmodule AuthKit.Device do
   defp normalize_scope(""), do: {:ok, nil}
 
   defp normalize_scope(scope) when is_binary(scope) do
-    scope = String.trim(scope)
+    if String.valid?(scope) do
+      scope = String.trim(scope)
 
-    cond do
-      scope == "" -> {:ok, nil}
-      String.length(scope) > @max_scope -> {:error, :invalid_request}
-      not String.printable?(scope) -> {:error, :invalid_request}
-      true -> {:ok, scope}
+      cond do
+        scope == "" -> {:ok, nil}
+        byte_size(scope) > @max_varchar -> {:error, :invalid_request}
+        not String.printable?(scope) -> {:error, :invalid_request}
+        true -> {:ok, scope}
+      end
+    else
+      {:error, :invalid_request}
     end
   end
 
@@ -1308,10 +1375,17 @@ defmodule AuthKit.Device do
     end
   end
 
+  # Lengths below 7 miss the 2^-32 bar this module advertises. Length 7
+  # meets it. Refuse a shorter setting by using the default of 8.
   defp user_code_length do
     case conf(:user_code_length, @default_user_code_length) do
-      length when is_integer(length) and length in 4..32 -> length
-      _other -> @default_user_code_length
+      length
+      when is_integer(length) and
+             length in @min_user_code_length..@max_user_code_length ->
+        length
+
+      _other ->
+        @default_user_code_length
     end
   end
 
