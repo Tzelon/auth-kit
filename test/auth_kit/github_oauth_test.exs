@@ -9,9 +9,40 @@ defmodule AuthKit.GitHubOAuthTest do
   alias AuthKit.Test.OAuthHTTPStub
   alias AuthKit.Test.User
 
+  import ExUnit.CaptureLog
+
   @state "state-1"
   @code "auth-code"
   @redirect_uri "http://localhost/auth/github/callback"
+
+  test "sign_in_social redirects to GitHub", %{conn: conn} do
+    previous = Application.get_env(:auth_kit, :github)
+
+    Application.put_env(:auth_kit, :github,
+      client_id: "client",
+      client_secret: "secret",
+      redirect_uri: @redirect_uri
+    )
+
+    on_exit(fn ->
+      if previous do
+        Application.put_env(:auth_kit, :github, previous)
+      else
+        Application.delete_env(:auth_kit, :github)
+      end
+    end)
+
+    conn = Auth2.sign_in_social(conn, %{"provider" => "github"})
+    uri = URI.parse(redirected_to(conn))
+    assert uri.scheme == "https"
+    assert uri.host == "github.com"
+    assert uri.path == "/login/oauth/authorize"
+    query = URI.decode_query(uri.query)
+    assert query["client_id"] == "client"
+    assert query["prompt"] == "select_account"
+    assert query["scope"] |> String.split(" ") |> Enum.sort() == ["read:user", "user:email"]
+    assert get_session(conn, :session_params).state == query["state"]
+  end
 
   test "authorization URL requests user:email" do
     assert {:ok, %{url: url, session_params: %{state: state}}} =
@@ -73,6 +104,7 @@ defmodule AuthKit.GitHubOAuthTest do
       )
 
     assert redirected_to(conn) == "/"
+    assert get_session(conn, :session_params) == nil
     user = Auth.fetch_user_by_session_token(get_session(conn, :user_token))
     assert user.email == "ada@example.com"
     assert user.name == "Ada Lovelace"
@@ -113,12 +145,21 @@ defmodule AuthKit.GitHubOAuthTest do
 
     put_github_config(stub)
 
-    assert_raise AuthKit.OAuth.Error, "GitHub account has no primary verified email", fn ->
-      conn
-      |> callback_conn()
-      |> Auth2.callback(%{"provider" => "github", "code" => @code, "state" => @state})
-    end
+    log =
+      capture_log(fn ->
+        failed =
+          conn
+          |> callback_conn()
+          |> Auth2.callback(%{"provider" => "github", "code" => @code, "state" => @state})
 
+        send(
+          self(),
+          {:failed, failed.status, failed.resp_body, get_session(failed, :session_params)}
+        )
+      end)
+
+    assert_received {:failed, 401, "OAuth sign-in failed", nil}
+    assert log =~ "GitHub account has no primary verified email"
     assert Repo.aggregate(User, :count) == 0
     assert Repo.aggregate(Identity, :count) == 0
   end
@@ -139,12 +180,21 @@ defmodule AuthKit.GitHubOAuthTest do
 
     put_github_config(stub)
 
-    assert_raise AuthKit.OAuth.Error, "Email is not verified", fn ->
-      conn
-      |> callback_conn()
-      |> Auth2.callback(%{"provider" => "github", "code" => @code, "state" => @state})
-    end
+    log =
+      capture_log(fn ->
+        failed =
+          conn
+          |> callback_conn()
+          |> Auth2.callback(%{"provider" => "github", "code" => @code, "state" => @state})
 
+        send(
+          self(),
+          {:failed, failed.status, failed.resp_body, get_session(failed, :session_params)}
+        )
+      end)
+
+    assert_received {:failed, 401, "OAuth sign-in failed", nil}
+    assert log =~ "Email is not verified"
     assert Repo.aggregate(User, :count) == 0
     assert Repo.aggregate(Identity, :count) == 0
   end
@@ -156,19 +206,110 @@ defmodule AuthKit.GitHubOAuthTest do
           {400,
            %{
              "error" => "bad_verification_code",
-             "error_description" => "The code passed is incorrect or expired."
+             "error_description" => "The code passed is incorrect or expired.",
+             "access_token" => "do-not-log"
            }}
       })
 
     put_github_config(stub)
 
-    assert_raise AuthKit.OAuth.Error, ~r/^Token request failed with status 400:/, fn ->
-      conn
-      |> callback_conn()
-      |> Auth2.callback(%{"provider" => "github", "code" => @code, "state" => @state})
-    end
+    log =
+      capture_log(fn ->
+        failed =
+          conn
+          |> callback_conn()
+          |> Auth2.callback(%{"provider" => "github", "code" => @code, "state" => @state})
 
+        send(
+          self(),
+          {:failed, failed.status, failed.resp_body, get_session(failed, :session_params)}
+        )
+      end)
+
+    assert_received {:failed, 401, "OAuth sign-in failed", nil}
+    assert log =~ "status=400"
+    assert log =~ "error=bad_verification_code"
+    assert log =~ "error_description=The code passed is incorrect or expired."
+    refute log =~ "do-not-log"
     assert Repo.aggregate(User, :count) == 0
+  end
+
+  test "rejects a callback state that does not match" do
+    assert {:error, %AuthKit.OAuth.Error{message: "Invalid state param, possible CSRF attempt"}} =
+             GitHub.callback(
+               [
+                 client_id: "client",
+                 client_secret: "secret",
+                 redirect_uri: @redirect_uri,
+                 session_params: %{state: @state}
+               ],
+               %{"code" => @code, "state" => "wrong-state"}
+             )
+  end
+
+  test "rejects a callback with no state" do
+    assert {:error, %AuthKit.OAuth.Error{message: "Invalid state param, possible CSRF attempt"}} =
+             GitHub.callback(
+               [
+                 client_id: "client",
+                 client_secret: "secret",
+                 redirect_uri: @redirect_uri,
+                 session_params: %{state: @state}
+               ],
+               %{"code" => @code}
+             )
+  end
+
+  test "user denied clears the oauth session and writes nothing", %{conn: conn} do
+    put_github_config(stub(%{}))
+
+    log =
+      capture_log(fn ->
+        failed =
+          conn
+          |> put_session(:session_params, %{state: @state})
+          |> Map.put(
+            :query_string,
+            "error=access_denied&error_description=The+user+has+denied+access&state=#{@state}"
+          )
+          |> Auth2.callback(%{"provider" => "github", "code" => @code, "state" => @state})
+
+        send(
+          self(),
+          {:failed, failed.status, failed.resp_body, get_session(failed, :session_params)}
+        )
+      end)
+
+    assert_received {:failed, 401, "OAuth sign-in failed", nil}
+    assert log =~ "The user has denied access"
+    assert Repo.aggregate(User, :count) == 0
+    assert Repo.aggregate(Identity, :count) == 0
+  end
+
+  test "query provider does not replace the validated provider", %{conn: conn} do
+    stub =
+      stub(%{
+        {"POST", "/login/oauth/access_token"} => {200, %{"access_token" => "gho_test"}},
+        {"GET", "/user"} =>
+          {200, %{"id" => 42, "login" => "ada", "name" => "Ada", "avatar_url" => nil}},
+        {"GET", "/user/emails"} =>
+          {200, [%{"email" => "ada@example.com", "primary" => true, "verified" => true}]}
+      })
+
+    put_github_config(stub)
+
+    conn =
+      conn
+      |> put_session(:session_params, %{state: @state})
+      |> Map.put(:query_string, "code=#{@code}&state=#{@state}&provider=google")
+      |> Auth2.callback(%{"provider" => "github", "code" => @code, "state" => @state},
+        auto_signup: true
+      )
+
+    assert redirected_to(conn) == "/"
+    assert get_session(conn, :session_params) == nil
+    assert Repo.get_by!(Identity, provider: "github", identity: "42")
+    refute Repo.get_by(Identity, provider: "google")
   end
 
   test "links a verified GitHub email to the existing user", %{conn: conn} do

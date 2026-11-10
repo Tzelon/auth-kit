@@ -2,6 +2,7 @@ defmodule AuthKit.OAuthSignInTest do
   use AuthKit.ConnCase, async: false
 
   alias AuthKit.Auth
+  alias AuthKit.Auth.Auth2
   alias AuthKit.Auth.MagicLink
   alias AuthKit.Fixtures
   alias AuthKit.Test.Identity
@@ -81,6 +82,30 @@ defmodule AuthKit.OAuthSignInTest do
     assert Repo.aggregate(Identity, :count) == 0
   end
 
+  test "unverified profile does not link an existing user" do
+    {existing, password} = Fixtures.user_with_password_fixture(%{email: "ada@example.com"})
+    credential = Repo.get_by!(Identity, user_id: existing.id, provider: "credential")
+
+    assert {:error, :email_not_verified} =
+             Auth.sign_in_with_oauth(
+               "github",
+               %{
+                 identity: "unverified",
+                 email: "Ada@Example.com",
+                 email_verified: false,
+                 name: "Ada"
+               },
+               %{access_token: "gho_nope"}
+             )
+
+    user = Repo.get!(User, existing.id)
+    refute user.email_confirmed_at
+    assert Auth.valid_password?(Repo.get!(Identity, credential.id), password)
+    refute Repo.get_by(Identity, provider: "github", identity: "unverified")
+    assert Repo.aggregate(User, :count) == 1
+    assert Repo.aggregate(Identity, :count) == 1
+  end
+
   test "auto_signup false returns user_not_found and writes nothing" do
     assert {:error, :user_not_found} =
              Auth.sign_in_with_oauth(
@@ -150,7 +175,7 @@ defmodule AuthKit.OAuthSignInTest do
     assert Repo.aggregate(User, :count) == 1
   end
 
-  test "runs Google-shaped claims through sign_in_with_oauth" do
+  test "maps Google claims through Auth2.oauth_profile" do
     claims = %{
       "sub" => "google-sub-1",
       "email" => "Ada@Example.com",
@@ -159,16 +184,21 @@ defmodule AuthKit.OAuthSignInTest do
       "picture" => "https://example.com/ada.png"
     }
 
+    assert Auth2.oauth_profile(claims) == %{
+             identity: "google-sub-1",
+             email: "Ada@Example.com",
+             email_verified: true,
+             name: "Ada Lovelace",
+             avatar_url: "https://example.com/ada.png"
+           }
+
+    refute Auth2.oauth_profile(%{"email_verified" => "false"}).email_verified
+    refute Auth2.oauth_profile(%{"email_verified" => false}).email_verified
+
     assert {:ok, user} =
              Auth.sign_in_with_oauth(
                "google",
-               %{
-                 identity: claims["sub"],
-                 email: claims["email"],
-                 email_verified: claims["email_verified"] in [true, "true"],
-                 name: claims["name"],
-                 avatar_url: claims["picture"]
-               },
+               Auth2.oauth_profile(claims),
                %{access_token: "ya29.test", id_token: "header.payload.sig"},
                auto_signup: true
              )
@@ -185,17 +215,96 @@ defmodule AuthKit.OAuthSignInTest do
     refute identity.scope
   end
 
-  test "lower(email) unique index rejects another user that differs only by case" do
-    user = Fixtures.user_fixture(%{email: "ada@example.com"})
+  test "a blank name returns a changeset and writes nothing" do
+    assert {:error, %Ecto.Changeset{} = changeset} =
+             Auth.sign_in_with_oauth(
+               "github",
+               %{identity: "blank", email: "ada@example.com", email_verified: true, name: "  "},
+               %{},
+               auto_signup: true
+             )
+
+    assert {"can't be blank", _} = changeset.errors[:name]
+    assert Repo.aggregate(User, :count) == 0
+    assert Repo.aggregate(Identity, :count) == 0
+  end
+
+  test "two identities from the same provider both sign in" do
+    assert {:ok, user} =
+             Auth.sign_in_with_oauth(
+               "github",
+               %{identity: "gh-1", email: "ada@example.com", email_verified: true, name: "Ada"},
+               %{access_token: "token-1"},
+               auto_signup: true
+             )
+
+    assert {:ok, linked} =
+             Auth.sign_in_with_oauth(
+               "github",
+               %{identity: "gh-2", email: "Ada@Example.com", email_verified: true, name: "Ada"},
+               %{access_token: "token-2"}
+             )
+
+    assert linked.id == user.id
+
+    assert {:ok, _} =
+             Auth.sign_in_with_oauth(
+               "github",
+               %{identity: "gh-1", email: "other@example.com", email_verified: false, name: "X"},
+               %{access_token: "token-1b"}
+             )
+
+    assert {:ok, _} =
+             Auth.sign_in_with_oauth(
+               "github",
+               %{identity: "gh-2", email: "other@example.com", email_verified: false, name: "Y"},
+               %{access_token: "token-2b"}
+             )
+
+    first = Repo.get_by!(Identity, provider: "github", identity: "gh-1")
+    second = Repo.get_by!(Identity, provider: "github", identity: "gh-2")
+    assert first.user_id == user.id
+    assert second.user_id == user.id
+    assert first.access_token == "token-1b"
+    assert second.access_token == "token-2b"
+    assert Repo.aggregate(User, :count) == 1
+    assert Repo.aggregate(Identity, :count) == 2
+  end
+
+  test "duplicate provider and identity returns a changeset" do
+    assert {:ok, user} =
+             Auth.sign_in_with_oauth(
+               "github",
+               %{identity: "same", email: "ada@example.com", email_verified: true, name: "Ada"},
+               %{access_token: "token-a"},
+               auto_signup: true
+             )
+
+    other = Fixtures.user_fixture(%{email: "other@example.com"})
 
     assert {:error, changeset} =
-             %User{}
-             |> Ecto.Changeset.cast(%{email: "Ada@Example.com", name: "Other"}, [:email, :name])
-             |> Ecto.Changeset.validate_required([:email, :name])
-             |> Ecto.Changeset.unique_constraint(:email, name: :users_lower_email_index)
-             |> Repo.insert()
+             Auth.link_identity(%{
+               user_id: other.id,
+               provider: "github",
+               identity: "same",
+               access_token: "token-b"
+             })
 
-    assert {"has already been taken", _opts} = changeset.errors[:email]
+    assert {"has already been taken", _} = changeset.errors[:identity]
+    assert Repo.get_by!(Identity, provider: "github", identity: "same").user_id == user.id
+    refute Repo.get_by(Identity, user_id: other.id, provider: "github")
+  end
+
+  test "lower(email) constraint rejects a case-only duplicate through the user changeset" do
+    user = Fixtures.user_fixture(%{email: "ada@example.com"})
+
+    exception =
+      assert_raise Ecto.InvalidChangesetError, fn ->
+        Auth.create_user(%{email: "Ada@Example.com", name: "Other"})
+      end
+
+    assert {"has already been taken", _opts} = exception.changeset.errors[:email]
     assert Repo.get(User, user.id)
+    assert Repo.aggregate(User, :count) == 1
   end
 end

@@ -38,6 +38,10 @@ defmodule AuthKit.Test.Repo.Migrations.CreateAuthTables do
 
     create(index(:identities, [:user_id, :provider]))
 
+    create(
+      unique_index(:identities, [:provider, :identity], name: :identities_provider_identity_index)
+    )
+
     create table(:users_tokens, primary_key: false) do
       add(:id, :binary_id, primary_key: true)
       add(:token, :binary, null: false)

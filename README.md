@@ -52,19 +52,20 @@ schema "users" do
 end
 ```
 
-Add a unique index on the lowercased email. `AuthKit.Auth` maps a conflict
-on `users_lower_email_index` to a changeset error.
+The host app must add these unique indexes. Account linking is unsafe without them.
 
 ```elixir
 create unique_index(:users, ["lower(email)"], name: :users_lower_email_index)
+
+create unique_index(:identities, [:provider, :identity],
+         name: :identities_provider_identity_index)
 ```
 
-Rows that already store the same address in a different letter case make
-this index fail to build. Merge those accounts before adding it. AuthKit
-does not ship a migration that rewrites existing emails, and it does not
-ship a host migration or a migration generator. The library's own test
-schema, `test/support/migrations/20260929000000_create_auth_tables.exs`,
-includes the index.
+`AuthKit.Auth` maps a conflict on either index to a changeset error.
+Rows that already store the same address in a different letter case, or
+two identity rows with the same provider and identity, make the indexes
+fail to build. Merge those rows before adding them. AuthKit does not ship
+a migration that rewrites existing rows, and it does not ship a host migration.
 
 The identity and user token schemas get their fields from AuthKit:
 
@@ -102,6 +103,10 @@ config :auth_kit, :github,
   client_secret: System.get_env("GITHUB_CLIENT_SECRET"),
   redirect_uri: "https://example.com/auth/github/callback"
 ```
+
+`:token_url` overrides the access-token URL for GitHub Enterprise Server.
+`:user_url` overrides the user profile URL for GitHub Enterprise Server.
+`:emails_url` overrides the email list URL for GitHub Enterprise Server.
 
 `AuthKit.Auth.sign_in_with_oauth(provider, profile, token_attrs \\ %{}, opts \\ [])`
 returns `{:ok, user}` or `{:error, reason}`.

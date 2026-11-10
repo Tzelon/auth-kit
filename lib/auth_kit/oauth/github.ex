@@ -1,8 +1,12 @@
 defmodule AuthKit.OAuth.GitHub do
   @moduledoc """
+  GitHub OAuth sign-in.
+
   Only a primary verified address from `/user/emails` is used.
   Any other mailbox returns `{:error, %AuthKit.OAuth.Error{}}`.
   """
+
+  require Logger
 
   alias AuthKit.OAuth.{Error, HTTP}
 
@@ -80,16 +84,16 @@ defmodule AuthKit.OAuth.GitHub do
           {:ok, token}
 
         {:ok, 200, %{"error" => error} = body} ->
+          log_github_failure(200, body)
+
           {:error,
            Error.exception(
              message: "GitHub returned an error: #{body["error_description"] || error}"
            )}
 
         {:ok, status, body} ->
-          {:error,
-           Error.exception(
-             message: "Token request failed with status #{status}: #{inspect(body)}"
-           )}
+          log_github_failure(status, body)
+          {:error, Error.exception(message: "Token request failed with status #{status}")}
 
         {:error, error} ->
           {:error, error}
@@ -124,8 +128,8 @@ defmodule AuthKit.OAuth.GitHub do
         {:ok, body}
 
       {:ok, status, body} ->
-        {:error,
-         Error.exception(message: "#{label} failed with status #{status}: #{inspect(body)}")}
+        log_github_failure(status, body)
+        {:error, Error.exception(message: "#{label} failed with status #{status}")}
 
       {:error, error} ->
         {:error, error}
@@ -160,6 +164,15 @@ defmodule AuthKit.OAuth.GitHub do
     |> Enum.find(&(is_binary(&1) and String.trim(&1) != ""))
     |> String.trim()
   end
+
+  defp log_github_failure(status, body) do
+    Logger.error(
+      "GitHub request failed status=#{status} error=#{github_field(body, "error")} error_description=#{github_field(body, "error_description")}"
+    )
+  end
+
+  defp github_field(body, key) when is_map(body), do: body[key]
+  defp github_field(_body, _key), do: nil
 
   defp token_url(config), do: config[:token_url] || @token_url
   defp user_url(config), do: config[:user_url] || @user_url

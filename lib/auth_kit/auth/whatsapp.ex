@@ -1,4 +1,6 @@
 defmodule AuthKit.Auth.Whatsapp do
+  require Logger
+
   import Ecto.Changeset
   import AuthKit.Auth.ConnHelpers
   import Plug.Conn

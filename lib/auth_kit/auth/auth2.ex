@@ -1,4 +1,6 @@
 defmodule AuthKit.Auth.Auth2 do
+  require Logger
+
   import AuthKit.Auth.ConnHelpers
   import Plug.Conn
 
@@ -25,10 +27,15 @@ defmodule AuthKit.Auth.Auth2 do
 
     with {:ok, params} <- validate_params(params, types, [:provider]),
          {:ok, strategy, config} <- get_provider(params["provider"]) do
+      prompt = if params["request_sign_up"], do: "consent", else: "select_account"
+
       config
-      |> update_in([:authorization_params, :prompt], fn _ ->
-        if params["request_sign_up"], do: "consent", else: "select_account"
-      end)
+      |> Keyword.put(
+        :authorization_params,
+        config
+        |> Keyword.get(:authorization_params, [])
+        |> Keyword.put(:prompt, prompt)
+      )
       |> strategy.authorize_url()
       |> case do
         {:ok, %{url: url, session_params: session_params}} ->
@@ -55,29 +62,31 @@ defmodule AuthKit.Auth.Auth2 do
 
   @spec callback(Conn.t(), map(), keyword()) :: Conn.t()
   def callback(conn, params, opts \\ []) do
+    session_params = get_session(conn, :session_params)
+    conn = delete_session(conn, :session_params)
     types = %{provider: :string, code: :string, state: :string}
 
-    with {:ok, params} <- validate_params(params, types, [:provider, :code]),
-         {:ok, strategy, config} <- get_provider(params["provider"]) do
-      # End-user will return to the callback URL with params attached to the
-      # request. These must be passed on to the strategy. In this example we only
-      # expect GET query params, but the provider could also return the user with
-      # a POST request where the params is in the POST body.
+    with {:ok, validated} <- validate_params(params, types, [:provider, :code]),
+         provider = validated["provider"],
+         {:ok, strategy, config} <- get_provider(provider) do
+      # Query params carry code and state. They must not replace the validated provider.
       %{params: query_params} = fetch_query_params(conn)
-      params = Map.merge(params, query_params)
+
+      callback_params =
+        validated
+        |> Map.merge(query_params)
+        |> Map.put("provider", provider)
 
       # The session params (used for OAuth 2.0 and OIDC strategies) stored in the
       # request phase will be used in the callback phase
-      session_params = get_session(conn, :session_params)
-
       config
       # Session params should be added to the config so the strategy can use them
       |> Keyword.put(:session_params, session_params)
-      |> strategy.callback(params)
+      |> strategy.callback(callback_params)
       |> case do
         {:ok, %{user: user, token: token}} ->
           case Auth.sign_in_with_oauth(
-                 params["provider"],
+                 provider,
                  oauth_profile(user),
                  oauth_token_attrs(token),
                  opts
@@ -89,21 +98,24 @@ defmodule AuthKit.Auth.Auth2 do
               conn
               |> renew_session()
               |> put_token_in_session(session_token)
-              |> maybe_write_remember_me_cookie(session_token, params)
+              |> maybe_write_remember_me_cookie(session_token, callback_params)
               |> redirect(to: user_return_to || "/")
 
             {:error, reason} ->
-              raise oauth_sign_in_error(reason)
+              oauth_failure(conn, reason)
           end
 
         {:error, error} ->
-          raise error
+          oauth_failure(conn, error)
       end
+    else
+      other ->
+        oauth_failure(conn, other)
     end
   end
 
   # Google's email_verified claim may be the string "true".
-  defp oauth_profile(claims) do
+  def oauth_profile(claims) do
     %{
       identity: claims["sub"],
       email: claims["email"],
@@ -135,16 +147,26 @@ defmodule AuthKit.Auth.Auth2 do
     end
   end
 
-  defp oauth_sign_in_error(:email_not_verified) do
-    AuthKit.OAuth.Error.exception(message: "Email is not verified")
+  defp oauth_failure(conn, %Ecto.Changeset{} = changeset) do
+    Logger.error("OAuth sign-in failed: #{inspect(changeset.errors)}")
+    oauth_failure_response(conn)
   end
 
-  defp oauth_sign_in_error(%Ecto.Changeset{} = changeset) do
-    AuthKit.OAuth.Error.exception(message: "OAuth sign-in failed: #{inspect(changeset.errors)}")
+  defp oauth_failure(conn, %AuthKit.OAuth.Error{message: message}) do
+    Logger.error("OAuth sign-in failed: #{message}")
+    oauth_failure_response(conn)
   end
 
-  defp oauth_sign_in_error(reason) do
-    AuthKit.OAuth.Error.exception(message: "OAuth sign-in failed: #{inspect(reason)}")
+  defp oauth_failure(conn, reason) do
+    Logger.error("OAuth sign-in failed: #{inspect(reason)}")
+    oauth_failure_response(conn)
+  end
+
+  defp oauth_failure_response(conn) do
+    conn
+    |> delete_session(:session_params)
+    |> put_resp_content_type("text/plain")
+    |> send_resp(401, "OAuth sign-in failed")
   end
 
   # Get the OAuth provider module based on the provider name

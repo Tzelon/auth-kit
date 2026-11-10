@@ -84,7 +84,8 @@ defmodule AuthKit.Auth do
     ])
     |> validate_required([:user_id, :provider, :identity])
     |> validate_password(opts)
-    |> Repo.insert!()
+    |> unique_constraint(:identity, name: :identities_provider_identity_index)
+    |> Repo.insert()
   end
 
   @doc """
@@ -104,8 +105,10 @@ defmodule AuthKit.Auth do
       {:ok, _identity} = update_identity_tokens(identity, attrs)
       {:ok, Repo.preload(user, :identities, force: true)}
     else
-      _ = link_identity(Map.put(attrs, :user_id, user.id))
-      {:ok, Repo.preload(user, :identities, force: true)}
+      case link_identity(Map.put(attrs, :user_id, user.id)) do
+        {:ok, _identity} -> {:ok, Repo.preload(user, :identities, force: true)}
+        {:error, changeset} -> {:error, changeset}
+      end
     end
   end
 
@@ -374,23 +377,22 @@ defmodule AuthKit.Auth do
   end
 
   @doc """
-  `:auto_signup` defaults to `false`.
+  Signs in `provider` from `profile` and stores `token_attrs` on that identity.
 
-  An identity for `{provider, identity}` returns that user and refreshes its
-  tokens. Otherwise `:email_verified` must be `true`. Any other value returns
-  `{:error, :email_not_verified}` and writes nothing. A verified email is
-  looked up with `lower(email)` in the database. A match links the identity
-  and confirms the email. With `:auto_signup` false and no match, returns
-  `{:error, :user_not_found}` and writes nothing. `auto_signup: true` creates
-  the user, links the identity, and confirms the email in one transaction.
+  `:email_verified` must come from a trusted provider adapter and never from raw client input.
 
-  Google claims map as `identity: claims["sub"]`, `email: claims["email"]`,
-  `email_verified: claims["email_verified"] in [true, "true"]`,
-  `name: claims["name"]`, `avatar_url: claims["picture"]`.
+  `:auto_signup` defaults to `false`. An identity for `{provider, identity}`
+  returns that user and refreshes its tokens. Otherwise `:email_verified` must
+  be `true`. Any other value returns `{:error, :email_not_verified}` and writes
+  nothing. A verified email is looked up with `lower(email)` in the database.
+  A match links the identity and confirms the email. With `:auto_signup` false
+  and no match, returns `{:error, :user_not_found}` and writes nothing.
+  `auto_signup: true` creates the user, links the identity, and confirms the
+  email in one transaction.
 
   A missing `:identity`, or a verified profile with no email, returns
-  `{:error, :invalid_profile}`. A conflict on `users_lower_email_index`
-  returns `{:error, %Ecto.Changeset{}}`.
+  `{:error, :invalid_profile}`. A conflict on `users_lower_email_index` or
+  `identities_provider_identity_index` returns `{:error, %Ecto.Changeset{}}`.
   """
   @spec sign_in_with_oauth(String.t() | atom(), map(), map(), keyword()) ::
           {:ok, struct()}
@@ -402,13 +404,7 @@ defmodule AuthKit.Auth do
       when is_map(profile) and is_map(token_attrs) and is_list(opts) do
     with {:ok, identity} <- oauth_identity(profile) do
       case Repo.transaction(fn ->
-             sign_in_with_oauth_locked(
-               to_string(provider),
-               identity,
-               profile,
-               token_attrs,
-               opts
-             )
+             oauth_sign_in(to_string(provider), identity, profile, token_attrs, opts)
            end) do
         {:ok, user} -> {:ok, user}
         {:error, reason} -> {:error, reason}
@@ -518,15 +514,21 @@ defmodule AuthKit.Auth do
   defp put_credential_password(user, hashed_password) do
     case get_user_identity_by_provider(user, "credential") do
       nil ->
-        link_identity(
-          %{
-            user_id: user.id,
-            provider: "credential",
-            identity: user.id,
-            password: hashed_password
-          },
-          hash_password: false
-        )
+        case link_identity(
+               %{
+                 user_id: user.id,
+                 provider: "credential",
+                 identity: user.id,
+                 password: hashed_password
+               },
+               hash_password: false
+             ) do
+          {:ok, identity} ->
+            identity
+
+          {:error, changeset} ->
+            raise Ecto.InvalidChangesetError, action: :insert, changeset: changeset
+        end
 
       identity ->
         identity
@@ -558,10 +560,10 @@ defmodule AuthKit.Auth do
     end
   end
 
-  defp sign_in_with_oauth_locked(provider, identity, profile, token_attrs, opts) do
+  defp oauth_sign_in(provider, identity, profile, token_attrs, opts) do
     case fetch_user_by_identity(provider, identity) do
       %{} = user ->
-        refresh_oauth_tokens(user, provider, token_attrs)
+        refresh_oauth_tokens(user, provider, identity, token_attrs)
 
       nil ->
         if profile_value(profile, :email_verified) == true do
@@ -574,8 +576,8 @@ defmodule AuthKit.Auth do
 
   defp link_verified_oauth_user(provider, identity, profile, token_attrs, opts) do
     with {:ok, email} <- oauth_email(profile),
-         {:ok, user} <- find_or_insert_oauth_user(email, profile, opts) do
-      insert_oauth_identity(user, provider, identity, token_attrs)
+         {:ok, user} <- find_or_insert_oauth_user(email, profile, opts),
+         {:ok, _identity} <- insert_oauth_identity(user, provider, identity, token_attrs) do
       confirm_oauth_user(user)
     else
       {:error, reason} -> Repo.rollback(reason)
@@ -591,14 +593,14 @@ defmodule AuthKit.Auth do
 
       nil ->
         if Keyword.get(opts, :auto_signup, false) do
-          insert_oauth_user(email, profile)
+          insert_oauth_user(email, profile, opts)
         else
           {:error, :user_not_found}
         end
     end
   end
 
-  defp insert_oauth_user(email, profile) do
+  defp insert_oauth_user(email, profile, opts) do
     struct(@user)
     |> cast(
       %{
@@ -609,7 +611,7 @@ defmodule AuthKit.Auth do
       [:email, :name, :avatar_url]
     )
     |> validate_required([:email, :name])
-    |> validate_email([])
+    |> validate_email(opts)
     |> Repo.insert()
   end
 
@@ -622,17 +624,25 @@ defmodule AuthKit.Auth do
     link_identity(attrs)
   end
 
-  defp refresh_oauth_tokens(user, provider, token_attrs) do
-    attrs = token_attrs |> oauth_token_attrs() |> Map.put(:provider, provider)
+  defp refresh_oauth_tokens(user, provider, identity, token_attrs) do
+    attrs = oauth_token_attrs(token_attrs)
 
-    case update_user_tokens(user, attrs) do
-      {:ok, user} -> user
+    case Repo.get_by(@identity, user_id: user.id, provider: provider, identity: identity) do
+      nil ->
+        Repo.rollback(:invalid_profile)
+
+      row ->
+        case update_identity_tokens(row, attrs) do
+          {:ok, _row} -> Repo.preload(user, :identities, force: true)
+          {:error, changeset} -> Repo.rollback(changeset)
+        end
     end
   end
 
   defp confirm_oauth_user(user) do
     case confirm_user_email(user) do
       {:ok, user, _expired_tokens} -> user
+      {:error, _op, reason, _changes} -> Repo.rollback(reason)
       {:error, reason} -> Repo.rollback(reason)
     end
   end

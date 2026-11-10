@@ -2,7 +2,7 @@
 
 Source: https://better-auth.com/docs/llms.txt (checked 2026-09-28).
 
-Already supported: email + password, magic link, Google (OIDC), GitHub, WhatsApp code sign-in, sign-out. Shared OAuth account linking is `AuthKit.Auth.sign_in_with_oauth/3`.
+Already supported: email + password, magic link, Google (OIDC), GitHub, WhatsApp code sign-in, sign-out. Shared OAuth account linking is `AuthKit.Auth.sign_in_with_oauth/4`.
 
 ## Email & password extras
 
