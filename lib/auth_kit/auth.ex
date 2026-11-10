@@ -612,6 +612,9 @@ defmodule AuthKit.Auth do
     )
     |> validate_required([:email, :name])
     |> validate_email(opts)
+    # :validate_email false drops these. A duplicate email must still be a changeset.
+    |> unique_constraint(:email)
+    |> unique_constraint(:email, name: @lower_email_index)
     |> Repo.insert()
   end
 

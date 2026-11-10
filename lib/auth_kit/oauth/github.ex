@@ -3,7 +3,7 @@ defmodule AuthKit.OAuth.GitHub do
   GitHub OAuth sign-in.
 
   Only a primary verified address from `/user/emails` is used.
-  Any other mailbox returns `{:error, %AuthKit.OAuth.Error{}}`.
+  Any other address returns `{:error, %AuthKit.OAuth.Error{}}`.
   """
 
   require Logger

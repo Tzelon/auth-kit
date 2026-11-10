@@ -115,6 +115,7 @@ defmodule AuthKit.Auth.Auth2 do
   end
 
   # Google's email_verified claim may be the string "true".
+  @doc false
   def oauth_profile(claims) do
     %{
       identity: claims["sub"],
@@ -164,7 +165,6 @@ defmodule AuthKit.Auth.Auth2 do
 
   defp oauth_failure_response(conn) do
     conn
-    |> delete_session(:session_params)
     |> put_resp_content_type("text/plain")
     |> send_resp(401, "OAuth sign-in failed")
   end

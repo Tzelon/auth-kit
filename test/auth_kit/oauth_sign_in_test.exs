@@ -295,6 +295,43 @@ defmodule AuthKit.OAuthSignInTest do
     refute Repo.get_by(Identity, user_id: other.id, provider: "github")
   end
 
+  test "validate_email false returns a changeset for a duplicate email and writes nothing" do
+    # The conflicting row lands after the email lookup, so only the unique index can reject it.
+    id = Ecto.UUID.generate()
+
+    Repo.query!("""
+    CREATE TEMP TRIGGER oauth_duplicate_email
+    BEFORE INSERT ON users
+    WHEN NEW.email = 'ada@example.com'
+    BEGIN
+      INSERT INTO users (id, email, name, inserted_at, updated_at)
+      VALUES ('#{id}', 'Ada@Example.com', 'Ada', '2020-01-01 00:00:00', '2020-01-01 00:00:00');
+    END
+    """)
+
+    on_exit(fn ->
+      Repo.query("DROP TRIGGER IF EXISTS oauth_duplicate_email")
+    end)
+
+    assert {:error, %Ecto.Changeset{} = changeset} =
+             Auth.sign_in_with_oauth(
+               "github",
+               %{
+                 identity: "dup",
+                 email: "ada@example.com",
+                 email_verified: true,
+                 name: "Ada"
+               },
+               %{},
+               auto_signup: true,
+               validate_email: false
+             )
+
+    assert {"has already been taken", _} = changeset.errors[:email]
+    assert Repo.aggregate(User, :count) == 0
+    assert Repo.aggregate(Identity, :count) == 0
+  end
+
   test "lower(email) constraint rejects a case-only duplicate through the user changeset" do
     user = Fixtures.user_fixture(%{email: "ada@example.com"})
 
