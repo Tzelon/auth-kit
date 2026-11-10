@@ -17,11 +17,6 @@ defmodule AuthKit.OAuth.HTTP do
     request(:post, request, url)
   end
 
-  @doc """
-  Sends a GET and decodes a JSON response.
-
-  `headers` is a list of `{name, value}` string pairs, added after `accept`.
-  """
   def get(url, headers) when is_list(headers) do
     header_list =
       for {name, value} <- headers do

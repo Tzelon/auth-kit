@@ -25,15 +25,10 @@ defmodule AuthKit.Auth.Auth2 do
 
     with {:ok, params} <- validate_params(params, types, [:provider]),
          {:ok, strategy, config} <- get_provider(params["provider"]) do
-      prompt = if params["request_sign_up"], do: "consent", else: "select_account"
-
       config
-      |> Keyword.put(
-        :authorization_params,
-        config
-        |> Keyword.get(:authorization_params, [])
-        |> Keyword.put(:prompt, prompt)
-      )
+      |> update_in([:authorization_params, :prompt], fn _ ->
+        if params["request_sign_up"], do: "consent", else: "select_account"
+      end)
       |> strategy.authorize_url()
       |> case do
         {:ok, %{url: url, session_params: session_params}} ->
@@ -59,7 +54,7 @@ defmodule AuthKit.Auth.Auth2 do
   end
 
   @spec callback(Conn.t(), map(), keyword()) :: Conn.t()
-  def callback(conn, params, _opts \\ []) do
+  def callback(conn, params, opts \\ []) do
     types = %{provider: :string, code: :string, state: :string}
 
     with {:ok, params} <- validate_params(params, types, [:provider, :code]),
@@ -84,7 +79,8 @@ defmodule AuthKit.Auth.Auth2 do
           case Auth.sign_in_with_oauth(
                  params["provider"],
                  oauth_profile(user),
-                 oauth_token_attrs(token)
+                 oauth_token_attrs(token),
+                 opts
                ) do
             {:ok, dbuser} ->
               session_token = Auth.generate_session_token(dbuser)
@@ -106,8 +102,7 @@ defmodule AuthKit.Auth.Auth2 do
     end
   end
 
-  # Google claims and the GitHub user map share these keys. Google's
-  # email_verified claim may be the string "true".
+  # Google's email_verified claim may be the string "true".
   defp oauth_profile(claims) do
     %{
       identity: claims["sub"],

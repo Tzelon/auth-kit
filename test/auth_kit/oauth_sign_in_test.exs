@@ -7,7 +7,7 @@ defmodule AuthKit.OAuthSignInTest do
   alias AuthKit.Test.Identity
   alias AuthKit.Test.User
 
-  test "creates a confirmed user from a verified profile" do
+  test "auto_signup true creates a confirmed user from a verified profile" do
     assert {:ok, user} =
              Auth.sign_in_with_oauth(
                "github",
@@ -18,7 +18,8 @@ defmodule AuthKit.OAuthSignInTest do
                  name: "Ada",
                  avatar_url: "https://example.com/ada.png"
                },
-               %{access_token: "gho_new", scope: "read:user,user:email"}
+               %{access_token: "gho_new", scope: "read:user,user:email"},
+               auto_signup: true
              )
 
     assert user.email == "ada@example.com"
@@ -33,7 +34,7 @@ defmodule AuthKit.OAuthSignInTest do
     assert Repo.aggregate(User, :count) == 1
   end
 
-  test "links a verified email to an existing password user when the case differs" do
+  test "auto_signup false links a verified email when the case differs" do
     {existing, password} = Fixtures.user_with_password_fixture(%{email: "ada@example.com"})
     credential = Repo.get_by!(Identity, user_id: existing.id, provider: "credential")
     assert Auth.valid_password?(credential, password)
@@ -48,7 +49,8 @@ defmodule AuthKit.OAuthSignInTest do
                  email_verified: true,
                  name: "Ada Lovelace"
                },
-               %{access_token: "gho_link"}
+               %{access_token: "gho_link"},
+               auto_signup: false
              )
 
     assert linked.id == existing.id
@@ -79,12 +81,25 @@ defmodule AuthKit.OAuthSignInTest do
     assert Repo.aggregate(Identity, :count) == 0
   end
 
+  test "auto_signup false returns user_not_found and writes nothing" do
+    assert {:error, :user_not_found} =
+             Auth.sign_in_with_oauth(
+               "github",
+               %{identity: "404", email: "ada@example.com", email_verified: true, name: "Ada"},
+               %{}
+             )
+
+    assert Repo.aggregate(User, :count) == 0
+    assert Repo.aggregate(Identity, :count) == 0
+  end
+
   test "signing in an existing identity refreshes tokens" do
     assert {:ok, user} =
              Auth.sign_in_with_oauth(
                "github",
                %{identity: "55", email: "ada@example.com", email_verified: true, name: "Ada"},
-               %{access_token: "gho_first", scope: "read:user"}
+               %{access_token: "gho_first", scope: "read:user"},
+               auto_signup: true
              )
 
     assert {:ok, again} =
@@ -96,7 +111,8 @@ defmodule AuthKit.OAuthSignInTest do
                  email_verified: false,
                  name: "Someone Else"
                },
-               %{access_token: "gho_second", scope: "read:user,user:email"}
+               %{access_token: "gho_second", scope: "read:user,user:email"},
+               auto_signup: false
              )
 
     assert again.id == user.id
@@ -115,7 +131,8 @@ defmodule AuthKit.OAuthSignInTest do
              Auth.sign_in_with_oauth(
                "github",
                %{identity: "77", email: "ADA@example.com", email_verified: true, name: "Ada"},
-               %{}
+               %{},
+               auto_signup: true
              )
 
     conn =
@@ -152,7 +169,8 @@ defmodule AuthKit.OAuthSignInTest do
                  name: claims["name"],
                  avatar_url: claims["picture"]
                },
-               %{access_token: "ya29.test", id_token: "header.payload.sig"}
+               %{access_token: "ya29.test", id_token: "header.payload.sig"},
+               auto_signup: true
              )
 
     assert user.email == "ada@example.com"

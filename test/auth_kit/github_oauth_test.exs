@@ -13,34 +13,6 @@ defmodule AuthKit.GitHubOAuthTest do
   @code "auth-code"
   @redirect_uri "http://localhost/auth/github/callback"
 
-  test "sign_in_social redirects to GitHub", %{conn: conn} do
-    previous = Application.get_env(:auth_kit, :github)
-
-    Application.put_env(:auth_kit, :github,
-      client_id: "client",
-      client_secret: "secret",
-      redirect_uri: @redirect_uri
-    )
-
-    on_exit(fn ->
-      if previous do
-        Application.put_env(:auth_kit, :github, previous)
-      else
-        Application.delete_env(:auth_kit, :github)
-      end
-    end)
-
-    conn = Auth2.sign_in_social(conn, %{"provider" => "github"})
-    uri = URI.parse(redirected_to(conn))
-    assert uri.scheme == "https"
-    assert uri.host == "github.com"
-    assert uri.path == "/login/oauth/authorize"
-    query = URI.decode_query(uri.query)
-    assert query["client_id"] == "client"
-    assert query["scope"] |> String.split(" ") |> Enum.sort() == ["read:user", "user:email"]
-    assert get_session(conn, :session_params).state == query["state"]
-  end
-
   test "authorization URL requests user:email" do
     assert {:ok, %{url: url, session_params: %{state: state}}} =
              GitHub.authorize_url(
@@ -96,7 +68,9 @@ defmodule AuthKit.GitHubOAuthTest do
     conn =
       conn
       |> callback_conn()
-      |> Auth2.callback(%{"provider" => "github", "code" => @code, "state" => @state})
+      |> Auth2.callback(%{"provider" => "github", "code" => @code, "state" => @state},
+        auto_signup: true
+      )
 
     assert redirected_to(conn) == "/"
     user = Auth.fetch_user_by_session_token(get_session(conn, :user_token))

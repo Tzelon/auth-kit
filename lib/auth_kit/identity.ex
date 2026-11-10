@@ -1,7 +1,7 @@
 defmodule AuthKit.Identity do
   @moduledoc """
   Fields for your identity schema: one row per way a user signs in, such as
-  a password, a Google account, or a GitHub account.
+  a password or a Google account.
 
       defmodule MyApp.Identity do
         use Ecto.Schema

@@ -1,31 +1,7 @@
 defmodule AuthKit.OAuth.GitHub do
   @moduledoc """
-  GitHub sign-in.
-
-  `authorize_url/1` starts the flow and `callback/2` finishes it. The code is
-  exchanged at `https://github.com/login/oauth/access_token`. The profile is
-  read from `https://api.github.com/user` and the address from
-  `https://api.github.com/user/emails`.
-
-  GitHub can omit the primary email on `/user`, so the authorization URL
-  requests `read:user` and `user:email`. The email on the returned user map
-  is an address from `/user/emails` that is both primary and verified.
-  `email_verified` is then `true`. Any other mailbox returns
-  `{:error, %AuthKit.OAuth.Error{}}`.
-
-  The user map uses the same keys as a Google ID token (`sub`, `email`,
-  `email_verified`, `name`, `picture`) so `AuthKit.Auth.sign_in_with_oauth/3`
-  can link the account. `sub` is the GitHub user id as a string.
-
-  ## Config
-
-    * `:client_id` - OAuth client ID (required)
-    * `:client_secret` - OAuth client secret (required)
-    * `:redirect_uri` - Callback URL registered with GitHub (required)
-    * `:authorization_params` - Extra params for the authorization URL (optional)
-    * `:session_params` - Params stored by `authorize_url/1`, required by `callback/2`
-
-  Set the same keys under `config :auth_kit, :github`.
+  Only a primary verified address from `/user/emails` is used.
+  Any other mailbox returns `{:error, %AuthKit.OAuth.Error{}}`.
   """
 
   alias AuthKit.OAuth.{Error, HTTP}
@@ -37,11 +13,6 @@ defmodule AuthKit.OAuth.GitHub do
   @default_scope "read:user user:email"
   @user_agent "auth-kit"
 
-  @doc """
-  Returns the GitHub authorization URL and the `:session_params` for `callback/2`.
-
-  The URL includes the `read:user` and `user:email` scopes.
-  """
   def authorize_url(config) do
     with {:ok, client_id} <- fetch_config(config, :client_id),
          {:ok, redirect_uri} <- fetch_config(config, :redirect_uri) do
@@ -63,12 +34,6 @@ defmodule AuthKit.OAuth.GitHub do
     end
   end
 
-  @doc """
-  Exchanges the callback `code` for an access token and a user map.
-
-  `email` is set only from a primary verified `/user/emails` row, and
-  `email_verified` is `true` in that case.
-  """
   def callback(config, params) do
     with {:ok, session_params} <- fetch_config(config, :session_params),
          :ok <- check_error(params),

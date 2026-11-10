@@ -91,8 +91,6 @@ end
 
 ## Social sign-in
 
-Google and GitHub share `AuthKit.Auth.sign_in_with_oauth/3`.
-
 ```elixir
 config :auth_kit, :google,
   client_id: System.get_env("GOOGLE_CLIENT_ID"),
@@ -105,38 +103,23 @@ config :auth_kit, :github,
   redirect_uri: "https://example.com/auth/github/callback"
 ```
 
-`AuthKit.OAuth.Google.callback/2` checks the OpenID Connect ID token.
-`AuthKit.OAuth.GitHub.callback/2` exchanges the code at
-`https://github.com/login/oauth/access_token`, then reads
-`https://api.github.com/user` and `https://api.github.com/user/emails`.
-The authorization URL requests `read:user` and `user:email`. GitHub can
-omit the primary email on `/user`. The address used for sign-in is a
-`/user/emails` row that is both primary and verified. Anything else
-returns `{:error, %AuthKit.OAuth.Error{}}` and does not sign the user in.
+`AuthKit.Auth.sign_in_with_oauth(provider, profile, token_attrs \\ %{}, opts \\ [])`
+returns `{:ok, user}` or `{:error, reason}`.
 
-`sign_in_with_oauth(provider, profile, token_attrs)` returns `{:ok, user}`
-or `{:error, reason}`.
+`:auto_signup` defaults to `false`. An identity for `{provider, identity}`
+returns that user and refreshes its tokens. Otherwise `:email_verified` must
+be `true`. Any other value returns `{:error, :email_not_verified}` and writes
+nothing. A verified email is looked up with `lower(email)` in the database.
+A match links the identity and confirms the email. With `:auto_signup` false
+and no match, the result is `{:error, :user_not_found}` and nothing is written.
+`auto_signup: true` creates the user, links the identity, and confirms the email.
 
-`profile` keys are `:identity`, `:email`, `:email_verified`, `:name`, and
-`:avatar_url`. `token_attrs` may include `:access_token`, `:refresh_token`,
-`:access_token_expires_at`, `:refresh_token_expires_at`, `:scope`,
-`:id_token`, `:state`, and `:provider_meta`.
+Google claims map as `identity: claims["sub"]`, `email: claims["email"]`,
+`email_verified: claims["email_verified"] in [true, "true"]`,
+`name: claims["name"]`, `avatar_url: claims["picture"]`.
 
-An identity row for `{provider, identity}` returns that user and stores the
-new tokens. Otherwise `:email_verified` must be `true`, and any other value
-returns `{:error, :email_not_verified}` without writing a user or an
-identity. A verified email is looked up with `lower(email)` in the database.
-A match links the identity and confirms the email. `confirm_user_email/1`
-removes a password that was set before the email was proven. No match
-creates the user with a lowercased email, links the identity, and confirms
-the email, in one transaction.
-
-Google claims map onto that profile as `identity: claims["sub"]`,
-`email: claims["email"]`, `email_verified: claims["email_verified"] in [true, "true"]`,
-`name: claims["name"]`, `avatar_url: claims["picture"]`. GitHub's callback
-user map uses those same keys. `sub` is the GitHub user id, `picture` is
-`avatar_url`, and `email_verified` is `true` only for the primary verified
-address.
+GitHub uses an address from `/user/emails` only when that address is both
+primary and verified.
 
 ## Email confirmation and passwords
 
