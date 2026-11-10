@@ -1,6 +1,4 @@
 defmodule AuthKit.Auth.Auth2 do
-  require Logger
-
   import AuthKit.Auth.ConnHelpers
   import Plug.Conn
 
@@ -27,10 +25,15 @@ defmodule AuthKit.Auth.Auth2 do
 
     with {:ok, params} <- validate_params(params, types, [:provider]),
          {:ok, strategy, config} <- get_provider(params["provider"]) do
+      prompt = if params["request_sign_up"], do: "consent", else: "select_account"
+
       config
-      |> update_in([:authorization_params, :prompt], fn _ ->
-        if params["request_sign_up"], do: "consent", else: "select_account"
-      end)
+      |> Keyword.put(
+        :authorization_params,
+        config
+        |> Keyword.get(:authorization_params, [])
+        |> Keyword.put(:prompt, prompt)
+      )
       |> strategy.authorize_url()
       |> case do
         {:ok, %{url: url, session_params: session_params}} ->
@@ -56,7 +59,7 @@ defmodule AuthKit.Auth.Auth2 do
   end
 
   @spec callback(Conn.t(), map(), keyword()) :: Conn.t()
-  def callback(conn, params, opts \\ []) do
+  def callback(conn, params, _opts \\ []) do
     types = %{provider: :string, code: :string, state: :string}
 
     with {:ok, params} <- validate_params(params, types, [:provider, :code]),
@@ -65,7 +68,8 @@ defmodule AuthKit.Auth.Auth2 do
       # request. These must be passed on to the strategy. In this example we only
       # expect GET query params, but the provider could also return the user with
       # a POST request where the params is in the POST body.
-      %{params: params} = fetch_query_params(conn)
+      %{params: query_params} = fetch_query_params(conn)
+      params = Map.merge(params, query_params)
 
       # The session params (used for OAuth 2.0 and OIDC strategies) stored in the
       # request phase will be used in the callback phase
@@ -77,32 +81,24 @@ defmodule AuthKit.Auth.Auth2 do
       |> strategy.callback(params)
       |> case do
         {:ok, %{user: user, token: token}} ->
-          {:ok, dbuser} = find_or_maybe_create_user(params["provider"], user, opts)
+          case Auth.sign_in_with_oauth(
+                 params["provider"],
+                 oauth_profile(user),
+                 oauth_token_attrs(token)
+               ) do
+            {:ok, dbuser} ->
+              session_token = Auth.generate_session_token(dbuser)
+              user_return_to = get_session(conn, :user_return_to)
 
-          expires_at =
-            DateTime.add(DateTime.utc_now(), token["expires_in"], :second)
+              conn
+              |> renew_session()
+              |> put_token_in_session(session_token)
+              |> maybe_write_remember_me_cookie(session_token, params)
+              |> redirect(to: user_return_to || "/")
 
-          _account =
-            Auth.update_user_tokens(dbuser, %{
-              provider: params["provider"],
-              identity: user["sub"],
-              access_token: token["access_token"],
-              refresh_token: token["refresh_token"],
-              access_token_expires_at: expires_at,
-              scope: token["scope"],
-              id_token: token["id_token"]
-            })
-
-          # TODO:  how should I link user if if have whatsapp login already?
-
-          token = Auth.generate_session_token(dbuser)
-          user_return_to = get_session(conn, :user_return_to)
-
-          conn
-          |> renew_session()
-          |> put_token_in_session(token)
-          |> maybe_write_remember_me_cookie(token, params)
-          |> redirect(to: user_return_to || "/")
+            {:error, reason} ->
+              raise oauth_sign_in_error(reason)
+          end
 
         {:error, error} ->
           raise error
@@ -110,44 +106,59 @@ defmodule AuthKit.Auth.Auth2 do
     end
   end
 
+  # Google claims and the GitHub user map share these keys. Google's
+  # email_verified claim may be the string "true".
+  defp oauth_profile(claims) do
+    %{
+      identity: claims["sub"],
+      email: claims["email"],
+      email_verified: claims["email_verified"] in [true, "true"],
+      name: claims["name"],
+      avatar_url: claims["picture"]
+    }
+  end
+
+  # GitHub's OAuth app tokens omit expires_in when the token does not expire.
+  defp oauth_token_attrs(token) do
+    attrs = %{
+      access_token: token["access_token"],
+      refresh_token: token["refresh_token"],
+      scope: token["scope"],
+      id_token: token["id_token"]
+    }
+
+    case token["expires_in"] do
+      seconds when is_integer(seconds) ->
+        Map.put(
+          attrs,
+          :access_token_expires_at,
+          DateTime.add(DateTime.utc_now(), seconds, :second)
+        )
+
+      _ ->
+        attrs
+    end
+  end
+
+  defp oauth_sign_in_error(:email_not_verified) do
+    AuthKit.OAuth.Error.exception(message: "Email is not verified")
+  end
+
+  defp oauth_sign_in_error(%Ecto.Changeset{} = changeset) do
+    AuthKit.OAuth.Error.exception(message: "OAuth sign-in failed: #{inspect(changeset.errors)}")
+  end
+
+  defp oauth_sign_in_error(reason) do
+    AuthKit.OAuth.Error.exception(message: "OAuth sign-in failed: #{inspect(reason)}")
+  end
+
   # Get the OAuth provider module based on the provider name
   @spec get_provider(String.t()) :: {:ok, module()} | {:error, :invalid_provider, map()}
   defp get_provider(provider) do
     case provider do
       "google" -> {:ok, AuthKit.OAuth.Google, Application.fetch_env!(:auth_kit, :google)}
-      # Add other providers as needed
+      "github" -> {:ok, AuthKit.OAuth.GitHub, Application.fetch_env!(:auth_kit, :github)}
       _ -> {:error, :invalid_provider, %{provider: "Invalid provider specified"}}
-    end
-  end
-
-  # The provider has verified the email, which proves the user owns it. An
-  # existing account with that email gets confirmed, which also removes any
-  # password set on it before the email was proven.
-  defp find_or_maybe_create_user(provider, params, opts) do
-    cond do
-      user = Auth.fetch_user_by_identity(provider, params["sub"]) ->
-        {:ok, user}
-
-      user = Auth.fetch_user_by_email(params["email"]) ->
-        confirm_user_email(user)
-
-      not Keyword.get(opts, :auto_signup, false) ->
-        {:error, :user_not_found}
-
-      Keyword.get(opts, :auto_signup) ->
-        %{
-          email: String.downcase(params["email"]),
-          name: params["name"],
-          avatar_url: params["picture"]
-        }
-        |> Auth.create_user(opts)
-        |> confirm_user_email()
-    end
-  end
-
-  defp confirm_user_email(user) do
-    with {:ok, user, _expired_tokens} <- Auth.confirm_user_email(user) do
-      {:ok, user}
     end
   end
 

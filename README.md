@@ -1,6 +1,6 @@
 # AuthKit
 
-Authentication building blocks for Elixir/Plug apps: email + password sign-up and sign-in (PBKDF2-SHA256 hashing), email confirmation, password reset, magic links, WhatsApp sign-in, Google sign-in via OpenID Connect, bearer sessions, and sign-out.
+Authentication building blocks for Elixir/Plug apps: email + password sign-up and sign-in (PBKDF2-SHA256 hashing), email confirmation, password reset, magic links, WhatsApp sign-in, Google sign-in via OpenID Connect, GitHub sign-in, bearer sessions, and sign-out.
 
 ## Installation
 
@@ -52,6 +52,20 @@ schema "users" do
 end
 ```
 
+Add a unique index on the lowercased email. `AuthKit.Auth` maps a conflict
+on `users_lower_email_index` to a changeset error.
+
+```elixir
+create unique_index(:users, ["lower(email)"], name: :users_lower_email_index)
+```
+
+Rows that already store the same address in a different letter case make
+this index fail to build. Merge those accounts before adding it. AuthKit
+does not ship a migration that rewrites existing emails, and it does not
+ship a host migration or a migration generator. The library's own test
+schema, `test/support/migrations/20260929000000_create_auth_tables.exs`,
+includes the index.
+
 The identity and user token schemas get their fields from AuthKit:
 
 ```elixir
@@ -74,6 +88,55 @@ defmodule MyApp.UserToken do
   end
 end
 ```
+
+## Social sign-in
+
+Google and GitHub share `AuthKit.Auth.sign_in_with_oauth/3`.
+
+```elixir
+config :auth_kit, :google,
+  client_id: System.get_env("GOOGLE_CLIENT_ID"),
+  client_secret: System.get_env("GOOGLE_CLIENT_SECRET"),
+  redirect_uri: "https://example.com/auth/google/callback"
+
+config :auth_kit, :github,
+  client_id: System.get_env("GITHUB_CLIENT_ID"),
+  client_secret: System.get_env("GITHUB_CLIENT_SECRET"),
+  redirect_uri: "https://example.com/auth/github/callback"
+```
+
+`AuthKit.OAuth.Google.callback/2` checks the OpenID Connect ID token.
+`AuthKit.OAuth.GitHub.callback/2` exchanges the code at
+`https://github.com/login/oauth/access_token`, then reads
+`https://api.github.com/user` and `https://api.github.com/user/emails`.
+The authorization URL requests `read:user` and `user:email`. GitHub can
+omit the primary email on `/user`. The address used for sign-in is a
+`/user/emails` row that is both primary and verified. Anything else
+returns `{:error, %AuthKit.OAuth.Error{}}` and does not sign the user in.
+
+`sign_in_with_oauth(provider, profile, token_attrs)` returns `{:ok, user}`
+or `{:error, reason}`.
+
+`profile` keys are `:identity`, `:email`, `:email_verified`, `:name`, and
+`:avatar_url`. `token_attrs` may include `:access_token`, `:refresh_token`,
+`:access_token_expires_at`, `:refresh_token_expires_at`, `:scope`,
+`:id_token`, `:state`, and `:provider_meta`.
+
+An identity row for `{provider, identity}` returns that user and stores the
+new tokens. Otherwise `:email_verified` must be `true`, and any other value
+returns `{:error, :email_not_verified}` without writing a user or an
+identity. A verified email is looked up with `lower(email)` in the database.
+A match links the identity and confirms the email. `confirm_user_email/1`
+removes a password that was set before the email was proven. No match
+creates the user with a lowercased email, links the identity, and confirms
+the email, in one transaction.
+
+Google claims map onto that profile as `identity: claims["sub"]`,
+`email: claims["email"]`, `email_verified: claims["email_verified"] in [true, "true"]`,
+`name: claims["name"]`, `avatar_url: claims["picture"]`. GitHub's callback
+user map uses those same keys. `sub` is the GitHub user id, `picture` is
+`avatar_url`, and `email_verified` is `true` only for the primary verified
+address.
 
 ## Email confirmation and passwords
 

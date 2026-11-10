@@ -15,6 +15,7 @@ defmodule AuthKit.Test.Repo.Migrations.CreateAuthTables do
     end
 
     create(unique_index(:users, [:email]))
+    create(unique_index(:users, ["lower(email)"], name: :users_lower_email_index))
     create(unique_index(:users, [:phone_number]))
 
     create table(:identities, primary_key: false) do

@@ -7,6 +7,7 @@ defmodule AuthKit.Auth do
 
   @user AuthKit.Config.user_schema()
   @identity AuthKit.Config.identity_schema()
+  @lower_email_index :users_lower_email_index
 
   def fetch_user_by_email(email, opts \\ []) do
     user = Repo.one(from u in AuthKit.Config.user_schema(), where: u.email == ^email)
@@ -362,7 +363,7 @@ defmodule AuthKit.Auth do
 
   @doc """
   Gets the user linked to the given provider identity, such as a
-  Google `sub`.
+  Google `sub` or a GitHub user id.
   """
   def fetch_user_by_identity(provider, identity) do
     Repo.one(
@@ -371,6 +372,67 @@ defmodule AuthKit.Auth do
         where: idn.provider == ^to_string(provider) and idn.identity == ^identity
     )
   end
+
+  @doc """
+  Signs `provider` in from a verified profile and stores `token_attrs` on that identity.
+
+  `provider` is the identity provider, `"google"` or `"github"`.
+  `profile` uses these keys:
+
+    * `:identity` - provider subject, a string or an integer id (required)
+    * `:email` - address the provider reported
+    * `:email_verified` - `true` when the provider has verified `:email`
+    * `:name` - display name used when creating a user
+    * `:avatar_url` - profile image URL
+
+  `token_attrs` is a map of token fields to store. Recognized keys are
+  `:access_token`, `:refresh_token`, `:access_token_expires_at`,
+  `:refresh_token_expires_at`, `:scope`, `:id_token`, `:state`, and
+  `:provider_meta`. Other keys are ignored. Pass `%{}` when there are none.
+
+  Google ID token claims map as `identity: claims["sub"]`, `email: claims["email"]`,
+  `email_verified: claims["email_verified"] in [true, "true"]`, `name: claims["name"]`,
+  `avatar_url: claims["picture"]`. GitHub uses the same keys. Its `:email` is the
+  primary verified address from `GET /user/emails`, and `:email_verified` is `true`.
+
+  ## Contract
+
+    1. An identity row for `{provider, identity}` returns that user and updates
+       the token fields. This runs even when `:email_verified` is not `true`.
+    2. Otherwise `:email_verified` must be `true`. Any other value returns
+       `{:error, :email_not_verified}` and writes no user and no identity.
+    3. Otherwise the user is looked up in the database with
+       `where: fragment("lower(?)", u.email) == ^String.downcase(email)`.
+       A match links this identity and calls `confirm_user_email/1`, which
+       removes a password set before the email was proven. No match creates
+       the user, links the identity, and confirms the email. The new user's
+       email is stored lowercased. Creation, linking, and confirmation run
+       in one transaction, so a second user is not created for an email that
+       already exists in any letter case.
+
+  A missing `:identity`, or a verified profile with no email, returns
+  `{:error, :invalid_profile}`. A unique conflict on `users_lower_email_index`,
+  or any other validation failure, returns `{:error, %Ecto.Changeset{}}`.
+
+  Returns `{:ok, user}` with the user schema struct, or `{:error, reason}`.
+  """
+  @spec sign_in_with_oauth(String.t() | atom(), map(), map()) ::
+          {:ok, struct()} | {:error, :email_not_verified | :invalid_profile | Ecto.Changeset.t()}
+  def sign_in_with_oauth(provider, profile, token_attrs \\ %{})
+
+  def sign_in_with_oauth(provider, profile, token_attrs)
+      when is_map(profile) and is_map(token_attrs) do
+    with {:ok, identity} <- oauth_identity(profile) do
+      case Repo.transaction(fn ->
+             sign_in_with_oauth_locked(to_string(provider), identity, profile, token_attrs)
+           end) do
+        {:ok, user} -> {:ok, user}
+        {:error, reason} -> {:error, reason}
+      end
+    end
+  end
+
+  def sign_in_with_oauth(_provider, _profile, _token_attrs), do: {:error, :invalid_profile}
 
   @doc """
   Verifies the password.
@@ -400,6 +462,7 @@ defmodule AuthKit.Auth do
       changeset
       |> unsafe_validate_unique(:email, AuthKit.Repo.repo())
       |> unique_constraint(:email)
+      |> unique_constraint(:email, name: @lower_email_index)
     else
       changeset
     end
@@ -510,6 +573,127 @@ defmodule AuthKit.Auth do
         from t in query, where: t.context != "session" or t.token != ^token
     end
   end
+
+  defp sign_in_with_oauth_locked(provider, identity, profile, token_attrs) do
+    case fetch_user_by_identity(provider, identity) do
+      %{} = user ->
+        refresh_oauth_tokens(user, provider, token_attrs)
+
+      nil ->
+        if profile_value(profile, :email_verified) == true do
+          link_verified_oauth_user(provider, identity, profile, token_attrs)
+        else
+          Repo.rollback(:email_not_verified)
+        end
+    end
+  end
+
+  defp link_verified_oauth_user(provider, identity, profile, token_attrs) do
+    with {:ok, email} <- oauth_email(profile),
+         {:ok, user} <- find_or_insert_oauth_user(email, profile) do
+      insert_oauth_identity(user, provider, identity, token_attrs)
+      confirm_oauth_user(user)
+    else
+      {:error, reason} -> Repo.rollback(reason)
+    end
+  end
+
+  defp find_or_insert_oauth_user(email, profile) do
+    email = String.downcase(email)
+
+    case Repo.one(from u in @user, where: fragment("lower(?)", u.email) == ^email) do
+      %{} = user ->
+        {:ok, user}
+
+      nil ->
+        struct(@user)
+        |> cast(
+          %{
+            email: email,
+            name: oauth_name(profile),
+            avatar_url: profile_value(profile, :avatar_url)
+          },
+          [:email, :name, :avatar_url]
+        )
+        |> validate_required([:email, :name])
+        |> validate_email([])
+        |> Repo.insert()
+    end
+  end
+
+  defp insert_oauth_identity(user, provider, identity, token_attrs) do
+    attrs =
+      token_attrs
+      |> oauth_token_attrs()
+      |> Map.merge(%{user_id: user.id, provider: provider, identity: identity})
+
+    link_identity(attrs)
+  end
+
+  defp refresh_oauth_tokens(user, provider, token_attrs) do
+    attrs = token_attrs |> oauth_token_attrs() |> Map.put(:provider, provider)
+
+    case update_user_tokens(user, attrs) do
+      {:ok, user} -> user
+    end
+  end
+
+  defp confirm_oauth_user(user) do
+    case confirm_user_email(user) do
+      {:ok, user, _expired_tokens} -> user
+      {:error, reason} -> Repo.rollback(reason)
+    end
+  end
+
+  defp oauth_token_attrs(token_attrs) do
+    token_attrs
+    |> Map.take([
+      :access_token,
+      :refresh_token,
+      :access_token_expires_at,
+      :refresh_token_expires_at,
+      :scope,
+      :id_token,
+      :state,
+      :provider_meta
+    ])
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Map.new()
+  end
+
+  defp oauth_identity(profile) do
+    case profile_value(profile, :identity) do
+      id when is_integer(id) ->
+        {:ok, Integer.to_string(id)}
+
+      id when is_binary(id) ->
+        id = String.trim(id)
+        if id == "", do: {:error, :invalid_profile}, else: {:ok, id}
+
+      _ ->
+        {:error, :invalid_profile}
+    end
+  end
+
+  defp oauth_email(profile) do
+    case profile_value(profile, :email) do
+      email when is_binary(email) ->
+        email = email |> String.trim() |> String.downcase()
+        if email == "", do: {:error, :invalid_profile}, else: {:ok, email}
+
+      _ ->
+        {:error, :invalid_profile}
+    end
+  end
+
+  defp oauth_name(profile) do
+    case profile_value(profile, :name) do
+      name when is_binary(name) -> String.trim(name)
+      _ -> nil
+    end
+  end
+
+  defp profile_value(profile, key) when is_atom(key), do: Map.get(profile, key)
 
   defp maybe_delete_password(multi, user, opts) do
     if Keyword.get(opts, :delete_password, false) do

@@ -1,6 +1,4 @@
 defmodule AuthKit.Auth.MagicLink do
-  require Logger
-
   import AuthKit.Auth.ConnHelpers
   import Plug.Conn
 

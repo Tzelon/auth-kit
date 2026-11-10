@@ -14,7 +14,30 @@ defmodule AuthKit.OAuth.HTTP do
       URI.encode_query(body)
     }
 
-    case :httpc.request(:post, request, http_options(), body_format: :binary) do
+    request(:post, request, url)
+  end
+
+  @doc """
+  Sends a GET and decodes a JSON response.
+
+  `headers` is a list of `{name, value}` string pairs, added after `accept`.
+  """
+  def get(url, headers) when is_list(headers) do
+    header_list =
+      for {name, value} <- headers do
+        {String.to_charlist(name), String.to_charlist(to_string(value))}
+      end
+
+    request = {
+      String.to_charlist(url),
+      [{~c"accept", ~c"application/json"} | header_list]
+    }
+
+    request(:get, request, url)
+  end
+
+  defp request(method, request, url) do
+    case :httpc.request(method, request, http_options(), body_format: :binary) do
       {:ok, {{_version, status, _reason}, _headers, response}} ->
         case JSON.decode(response) do
           {:ok, decoded} -> {:ok, status, decoded}
