@@ -92,7 +92,7 @@ defmodule AuthKit.OAuth.Google do
     with {:ok, client_id} <- fetch_config(config, :client_id),
          {:ok, client_secret} <- fetch_config(config, :client_secret),
          {:ok, redirect_uri} <- fetch_config(config, :redirect_uri) do
-      case HTTP.post_form(token_url(config), %{
+      case HTTP.post_form(@token_url, %{
              grant_type: "authorization_code",
              code: code,
              client_id: client_id,
@@ -120,8 +120,6 @@ defmodule AuthKit.OAuth.Google do
 
   defp token_field(body, key) when is_map(body), do: body[key]
   defp token_field(_body, _key), do: nil
-
-  defp token_url(config), do: config[:token_url] || @token_url
 
   # The ID token comes straight from Google's token endpoint over a verified
   # TLS connection, so per Google's docs the signature check can be skipped.
