@@ -8,7 +8,8 @@ config :auth_kit,
   user_token: AuthKit.Test.UserToken,
   tenant: AuthKit.Test.Tenant,
   tenant_member: AuthKit.Test.TenantMember,
-  tenant_invitation: AuthKit.Test.TenantInvitation
+  tenant_invitation: AuthKit.Test.TenantInvitation,
+  token_encryption_key: "JFW09y63mKSSrggag4otLvSxTn8xTS/H6e26aZbqypA="
 
 if config_env() == :test do
   import_config "test.exs"

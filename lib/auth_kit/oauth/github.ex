@@ -8,7 +8,7 @@ defmodule AuthKit.OAuth.GitHub do
 
   require Logger
 
-  alias AuthKit.OAuth.{Error, HTTP}
+  alias AuthKit.OAuth.{Error, HTTP, PKCE}
 
   @authorize_url "https://github.com/login/oauth/authorize"
   @token_url "https://github.com/login/oauth/access_token"
@@ -21,6 +21,7 @@ defmodule AuthKit.OAuth.GitHub do
     with {:ok, client_id} <- fetch_config(config, :client_id),
          {:ok, redirect_uri} <- fetch_config(config, :redirect_uri) do
       state = random_token()
+      pkce = PKCE.generate()
 
       query =
         [scope: @default_scope]
@@ -29,21 +30,30 @@ defmodule AuthKit.OAuth.GitHub do
           response_type: "code",
           client_id: client_id,
           redirect_uri: redirect_uri,
-          state: state
+          state: state,
+          code_challenge: pkce.code_challenge,
+          code_challenge_method: pkce.code_challenge_method
         )
         |> Enum.reject(fn {_key, value} -> is_nil(value) end)
 
       {:ok,
-       %{url: @authorize_url <> "?" <> URI.encode_query(query), session_params: %{state: state}}}
+       %{
+         url: @authorize_url <> "?" <> URI.encode_query(query),
+         session_params: %{
+           state: state,
+           code_verifier: pkce.code_verifier,
+           issued_at: System.system_time(:second)
+         }
+       }}
     end
   end
 
   def callback(config, params) do
     with {:ok, session_params} <- fetch_config(config, :session_params),
          :ok <- check_error(params),
-         :ok <- check_state(params, session_params),
+         {:ok, verifier} <- PKCE.check(params, session_params),
          {:ok, code} <- fetch_param(params, "code"),
-         {:ok, token} <- fetch_token(config, code),
+         {:ok, token} <- fetch_token(config, code, verifier),
          {:ok, user} <- fetch_user(config, token) do
       {:ok, %{user: user, token: token}}
     end
@@ -56,19 +66,7 @@ defmodule AuthKit.OAuth.GitHub do
 
   defp check_error(_params), do: :ok
 
-  defp check_state(params, session_params) do
-    expected = session_params[:state] || session_params["state"]
-    actual = params["state"]
-
-    if is_binary(expected) and is_binary(actual) and byte_size(expected) == byte_size(actual) and
-         :crypto.hash_equals(expected, actual) do
-      :ok
-    else
-      {:error, Error.exception(message: "Invalid state param, possible CSRF attempt")}
-    end
-  end
-
-  defp fetch_token(config, code) do
+  defp fetch_token(config, code, verifier) do
     with {:ok, client_id} <- fetch_config(config, :client_id),
          {:ok, client_secret} <- fetch_config(config, :client_secret),
          {:ok, redirect_uri} <- fetch_config(config, :redirect_uri) do
@@ -77,7 +75,8 @@ defmodule AuthKit.OAuth.GitHub do
              code: code,
              client_id: client_id,
              client_secret: client_secret,
-             redirect_uri: redirect_uri
+             redirect_uri: redirect_uri,
+             code_verifier: verifier
            }) do
         {:ok, 200, %{"access_token" => access_token} = token}
         when is_binary(access_token) and access_token != "" ->

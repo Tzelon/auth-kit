@@ -14,6 +14,11 @@ defmodule AuthKit.Identity do
       end
 
   Then set `config :auth_kit, identity: MyApp.Identity`.
+
+  `access_token`, `refresh_token`, and `id_token` are plaintext on the
+  struct. The database stores AES-256-GCM ciphertext prefixed with `ak1:`.
+  A value without that prefix is legacy plaintext and is encrypted the next
+  time that field is written.
   """
 
   defmacro __using__(_opts) do
@@ -29,12 +34,12 @@ defmodule AuthKit.Identity do
     quote do
       field :identity, :string
       field :provider, :string
-      field :access_token, :string, redact: true
-      field :refresh_token, :string, redact: true
+      field :access_token, AuthKit.EncryptedToken, redact: true
+      field :refresh_token, AuthKit.EncryptedToken, redact: true
       field :access_token_expires_at, :utc_datetime_usec
       field :refresh_token_expires_at, :utc_datetime_usec
       field :scope, :string
-      field :id_token, :string, redact: true
+      field :id_token, AuthKit.EncryptedToken, redact: true
       field :clear_password, :string, virtual: true, redact: true
       field :password, :string, redact: true
       field :state, Ecto.Enum, values: [:active, :reauth], default: :active

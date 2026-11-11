@@ -39,13 +39,19 @@ defmodule AuthKit.Test.OAuthHTTPStub do
     :ok
   end
 
-  def json(status, body) do
+  def json(status, body, headers \\ []) do
     payload = JSON.encode!(body)
+
+    header_lines =
+      Enum.map(headers, fn {key, value} ->
+        [to_string(key), ": ", to_string(value), "\r\n"]
+      end)
 
     [
       "HTTP/1.1 #{status} #{reason(status)}\r\n",
       "content-type: application/json\r\n",
       "content-length: #{byte_size(payload)}\r\n",
+      header_lines,
       "connection: close\r\n",
       "\r\n",
       payload

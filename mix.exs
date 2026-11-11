@@ -16,7 +16,8 @@ defmodule AuthKit.MixProject do
   # Run "mix help compile.app" to learn about applications.
   def application do
     [
-      extra_applications: [:logger, :crypto, :public_key, :ssl, :inets]
+      extra_applications: [:logger, :crypto, :public_key, :ssl, :inets],
+      mod: {AuthKit.Application, []}
     ]
   end
 
