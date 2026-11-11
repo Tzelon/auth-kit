@@ -40,9 +40,8 @@ defmodule AuthKit.TokenEncryption do
     end
   end
 
-  def decrypt(ciphertext) when is_binary(ciphertext) do
-    raise ArgumentError, "could not decrypt OAuth token"
-  end
+  # Rows written before encryption have no prefix. Sign-in preloads them, so they have to load.
+  def decrypt(value) when is_binary(value), do: value
 
   # A trailing newline from the environment is ignored.
   defp key! do

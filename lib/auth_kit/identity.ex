@@ -16,7 +16,8 @@ defmodule AuthKit.Identity do
   Then set `config :auth_kit, identity: MyApp.Identity`.
 
   `access_token`, `refresh_token`, and `id_token` are plaintext on the
-  struct. The database stores AES-256-GCM ciphertext prefixed with `ak1:`.
+  struct. New writes store AES-256-GCM ciphertext prefixed with `ak1:`.
+  A value without that prefix loads unchanged.
   """
 
   defmacro __using__(_opts) do

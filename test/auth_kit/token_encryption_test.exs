@@ -14,10 +14,7 @@ defmodule AuthKit.TokenEncryptionTest do
     assert first != "gho_secret"
     assert first != second
     assert TokenEncryption.decrypt(first) == "gho_secret"
-
-    assert_raise ArgumentError, ~r/could not decrypt/, fn ->
-      TokenEncryption.decrypt("plain-token")
-    end
+    assert TokenEncryption.decrypt("plain-token") == "plain-token"
   end
 
   test "raises when ciphertext is tampered or the key does not match" do

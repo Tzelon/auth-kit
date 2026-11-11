@@ -26,7 +26,7 @@ defmodule AuthKit.OAuth.JWKS do
         :miss ->
           case fetch_and_read(url, kid) do
             {:ok, jwk} -> {:ok, jwk}
-            :missing -> refetch(url, kid)
+            :missing -> {:error, Error.exception(message: "Unknown ID token signing key")}
             {:error, _} = error -> error
           end
       end

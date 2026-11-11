@@ -146,14 +146,14 @@ defmodule AuthKit.GoogleOAuthTest do
     assert Agent.get(count, & &1) == 2
   end
 
-  test "stops after one refetch when the kid is still unknown", %{private: private, other: other} do
-    %{url: url, count: count} = serve([[jwk(other, "other")], [jwk(other, "other")]])
+  test "fetches a cold cache once when the kid is unknown", %{private: private, other: other} do
+    %{url: url, count: count} = serve([[jwk(other, "other")]])
     jwt = sign(private, "kid-1", claims())
 
     assert {:error, %{message: "Unknown ID token signing key"}} =
              IDToken.verify(jwt, url, "client", "nonce-1")
 
-    assert Agent.get(count, & &1) == 2
+    assert Agent.get(count, & &1) == 1
   end
 
   test "refetches when max-age is zero", %{private: private} do
