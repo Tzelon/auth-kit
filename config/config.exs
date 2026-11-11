@@ -10,6 +10,10 @@ config :auth_kit,
   tenant_member: AuthKit.Test.TenantMember,
   tenant_invitation: AuthKit.Test.TenantInvitation
 
+if config_env() == :dev do
+  import_config "dev.exs"
+end
+
 if config_env() == :test do
   import_config "test.exs"
 end

@@ -34,12 +34,12 @@ defmodule AuthKit.Identity do
     quote do
       field :identity, :string
       field :provider, :string
-      field :access_token, AuthKit.EncryptedToken, field: :access_token, redact: true
-      field :refresh_token, AuthKit.EncryptedToken, field: :refresh_token, redact: true
+      field :access_token, AuthKit.EncryptedToken, redact: true
+      field :refresh_token, AuthKit.EncryptedToken, redact: true
       field :access_token_expires_at, :utc_datetime_usec
       field :refresh_token_expires_at, :utc_datetime_usec
       field :scope, :string
-      field :id_token, AuthKit.EncryptedToken, field: :id_token, redact: true
+      field :id_token, AuthKit.EncryptedToken, redact: true
       field :clear_password, :string, virtual: true, redact: true
       field :password, :string, redact: true
       field :state, Ecto.Enum, values: [:active, :reauth], default: :active

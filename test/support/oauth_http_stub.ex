@@ -14,64 +14,13 @@ defmodule AuthKit.Test.OAuthHTTPStub do
       csr: Path.join(dir, "server.csr")
     }
 
-    unless File.exists?(paths.cert) do
-      openssl!([
-        "req",
-        "-x509",
-        "-newkey",
-        "rsa:2048",
-        "-keyout",
-        paths.ca_key,
-        "-out",
-        paths.ca,
-        "-days",
-        "1",
-        "-nodes",
-        "-subj",
-        "/CN=auth-kit-test-ca",
-        "-addext",
-        "basicConstraints=critical,CA:TRUE"
-      ])
-
-      openssl!([
-        "req",
-        "-newkey",
-        "rsa:2048",
-        "-keyout",
-        paths.key,
-        "-out",
-        paths.csr,
-        "-nodes",
-        "-subj",
-        "/CN=127.0.0.1",
-        "-addext",
-        "subjectAltName=IP:127.0.0.1"
-      ])
-
-      openssl!([
-        "x509",
-        "-req",
-        "-in",
-        paths.csr,
-        "-CA",
-        paths.ca,
-        "-CAkey",
-        paths.ca_key,
-        "-CAcreateserial",
-        "-out",
-        paths.cert,
-        "-days",
-        "1",
-        "-copy_extensions",
-        "copy"
-      ])
+    if cert_stale?(paths) do
+      generate_certs!(paths)
+      :persistent_term.put(:auth_kit_test_ca_loaded, false)
     end
 
     unless :persistent_term.get(:auth_kit_test_ca_loaded, false) do
-      bundle = Path.join(dir, "bundle.pem")
-      system = File.read!("/etc/ssl/certs/ca-certificates.crt")
-      File.write!(bundle, [system, "\n", File.read!(paths.ca)])
-      :ok = :public_key.cacerts_load(String.to_charlist(bundle))
+      :ok = :public_key.cacerts_load(String.to_charlist(paths.ca))
       :persistent_term.put(:auth_kit_test_ca_loaded, true)
     end
 
@@ -214,6 +163,73 @@ defmodule AuthKit.Test.OAuthHTTPStub do
   defp read_body(socket, already, length) do
     {:ok, data} = :ssl.recv(socket, length - byte_size(already), 5_000)
     read_body(socket, already <> data, length)
+  end
+
+  defp cert_stale?(paths) do
+    not (File.exists?(paths.cert) and File.exists?(paths.ca) and fresh_cert?(paths.cert) and
+           fresh_cert?(paths.ca))
+  end
+
+  defp fresh_cert?(path) do
+    case System.cmd("openssl", ["x509", "-in", path, "-noout", "-checkend", "86400"],
+           stderr_to_stdout: true
+         ) do
+      {_output, 0} -> true
+      _ -> false
+    end
+  end
+
+  defp generate_certs!(paths) do
+    openssl!([
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-keyout",
+      paths.ca_key,
+      "-out",
+      paths.ca,
+      "-days",
+      "3650",
+      "-nodes",
+      "-subj",
+      "/CN=auth-kit-test-ca",
+      "-addext",
+      "basicConstraints=critical,CA:TRUE"
+    ])
+
+    openssl!([
+      "req",
+      "-newkey",
+      "rsa:2048",
+      "-keyout",
+      paths.key,
+      "-out",
+      paths.csr,
+      "-nodes",
+      "-subj",
+      "/CN=127.0.0.1",
+      "-addext",
+      "subjectAltName=IP:127.0.0.1"
+    ])
+
+    openssl!([
+      "x509",
+      "-req",
+      "-in",
+      paths.csr,
+      "-CA",
+      paths.ca,
+      "-CAkey",
+      paths.ca_key,
+      "-CAcreateserial",
+      "-out",
+      paths.cert,
+      "-days",
+      "3650",
+      "-copy_extensions",
+      "copy"
+    ])
   end
 
   defp openssl!(args) do

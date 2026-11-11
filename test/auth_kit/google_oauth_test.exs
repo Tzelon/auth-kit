@@ -174,6 +174,66 @@ defmodule AuthKit.GoogleOAuthTest do
     assert Agent.get(count, & &1) == 1
   end
 
+  test "two concurrent callers share one failed fetch" do
+    {:ok, count} = Agent.start_link(fn -> 0 end)
+
+    stub =
+      OAuthHTTPStub.start(fn _request ->
+        Process.sleep(200)
+        Agent.update(count, &(&1 + 1))
+        OAuthHTTPStub.json(500, %{"error" => "unavailable"})
+      end)
+
+    on_exit(fn ->
+      OAuthHTTPStub.stop(stub)
+      if Process.alive?(count), do: Agent.stop(count)
+    end)
+
+    url = stub.base <> "/certs/" <> Integer.to_string(System.unique_integer([:positive]))
+    first = Task.async(fn -> AuthKit.OAuth.JWKS.key(url, "kid-1") end)
+    second = Task.async(fn -> AuthKit.OAuth.JWKS.key(url, "other-kid") end)
+
+    assert {:error, _} = Task.await(first, 10_000)
+    assert {:error, _} = Task.await(second, 10_000)
+    assert Agent.get(count, & &1) == 1
+
+    assert {:error, _} = AuthKit.OAuth.JWKS.key(url, "kid-1")
+    assert Agent.get(count, & &1) == 1
+  end
+
+  test "an in-flight fetch does not block a hit for another url", %{other: other} do
+    parent = self()
+
+    stub =
+      OAuthHTTPStub.start(fn request ->
+        if String.contains?(request.path, "/slow") do
+          send(parent, :slow_started)
+          Process.sleep(400)
+          send(parent, :slow_done)
+          OAuthHTTPStub.json(500, %{"error" => "unavailable"})
+        else
+          send(parent, :fast_done)
+
+          OAuthHTTPStub.json(200, %{"keys" => [jwk(other, "kid-1")]}, [
+            {"cache-control", "max-age=3600"}
+          ])
+        end
+      end)
+
+    on_exit(fn -> OAuthHTTPStub.stop(stub) end)
+
+    suffix = Integer.to_string(System.unique_integer([:positive]))
+    slow = Task.async(fn -> AuthKit.OAuth.JWKS.key(stub.base <> "/slow/" <> suffix, "kid-1") end)
+    assert_receive :slow_started, 2_000
+
+    assert {:ok, %{"kid" => "kid-1"}} =
+             AuthKit.OAuth.JWKS.key(stub.base <> "/fast/" <> suffix, "kid-1")
+
+    refute_received :slow_done
+    assert_received :fast_done
+    assert {:error, _} = Task.await(slow, 5_000)
+  end
+
   test "refetches when max-age is zero", %{private: private} do
     %{url: url, count: count} =
       serve([[jwk(private, "kid-1")], [jwk(private, "kid-1")]], "max-age=0")

@@ -13,6 +13,8 @@ defmodule AuthKit.TokenEncryption do
 
   @iv_bytes 12
   @tag_bytes 16
+  @prefix ~r/^ak([1-9]\d*):(.*)/s
+  @keys_cache :auth_kit_token_encryption_keys
 
   @doc """
   Raises unless `:token_encryption_keys` maps positive integer versions to 32-byte base64 keys.
@@ -78,14 +80,12 @@ defmodule AuthKit.TokenEncryption do
     end
   end
 
-  defp parse(<<"ak", rest::binary>>) do
-    case Integer.parse(rest) do
-      {version, ":" <> encoded} when version > 0 -> {:ok, version, encoded}
+  defp parse(ciphertext) do
+    case Regex.run(@prefix, ciphertext) do
+      [_, version, encoded] -> {:ok, String.to_integer(version), encoded}
       _ -> :unprefixed
     end
   end
-
-  defp parse(_other), do: :unprefixed
 
   defp legacy(value) do
     if Application.get_env(:auth_kit, :allow_legacy_plaintext_tokens, false) == true do
@@ -100,13 +100,25 @@ defmodule AuthKit.TokenEncryption do
   defp keys! do
     case Application.get_env(:auth_kit, :token_encryption_keys) do
       map when is_map(map) and map != %{} ->
-        Map.new(map, fn {version, encoded} ->
-          {version!(version), decode_key!(encoded)}
-        end)
+        case :persistent_term.get(@keys_cache, :miss) do
+          {^map, keys} ->
+            keys
+
+          _ ->
+            keys = decode_keys!(map)
+            :persistent_term.put(@keys_cache, {map, keys})
+            keys
+        end
 
       _ ->
         raise ArgumentError, key_error("is required")
     end
+  end
+
+  defp decode_keys!(map) do
+    Map.new(map, fn {version, encoded} ->
+      {version!(version), decode_key!(encoded)}
+    end)
   end
 
   defp version!(version) when is_integer(version) and version > 0, do: version

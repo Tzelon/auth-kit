@@ -22,6 +22,14 @@ defmodule AuthKit.TokenEncryptionTest do
     assert_raise ArgumentError, ~r/legacy plaintext/, fn ->
       TokenEncryption.decrypt("plain-legacy-token", :access_token)
     end
+
+    assert_raise ArgumentError, ~r/legacy plaintext/, fn ->
+      TokenEncryption.decrypt("ak0:not-a-version", :access_token)
+    end
+
+    assert_raise ArgumentError, ~r/legacy plaintext/, fn ->
+      TokenEncryption.decrypt("ak01:not-a-version", :access_token)
+    end
   end
 
   test "raises when ciphertext is tampered or the key does not match" do
