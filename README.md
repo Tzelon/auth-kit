@@ -1,6 +1,6 @@
 # AuthKit
 
-Authentication building blocks for Elixir/Plug apps: email + password sign-up and sign-in (PBKDF2-SHA256 hashing), email confirmation, password reset, magic links, WhatsApp sign-in, Google sign-in via OpenID Connect, bearer sessions, and sign-out.
+Authentication building blocks for Elixir/Plug apps: email + password sign-up and sign-in (PBKDF2-SHA256 hashing), email confirmation, password reset, magic links, WhatsApp sign-in, Google sign-in via OpenID Connect, GitHub sign-in, bearer sessions, and sign-out.
 
 ## Installation
 
@@ -52,6 +52,21 @@ schema "users" do
 end
 ```
 
+The host app must add these unique indexes. Account linking is unsafe without them.
+
+```elixir
+create unique_index(:users, ["lower(email)"], name: :users_lower_email_index)
+
+create unique_index(:identities, [:provider, :identity],
+         name: :identities_provider_identity_index)
+```
+
+`AuthKit.Auth` maps a conflict on either index to a changeset error.
+Rows that already store the same address in a different letter case, or
+two identity rows with the same provider and identity, make the indexes
+fail to build. Merge those rows before adding them. AuthKit does not ship
+a migration that rewrites existing rows, and it does not ship a host migration.
+
 The identity and user token schemas get their fields from AuthKit:
 
 ```elixir
@@ -74,6 +89,42 @@ defmodule MyApp.UserToken do
   end
 end
 ```
+
+## Social sign-in
+
+```elixir
+config :auth_kit, :google,
+  client_id: System.get_env("GOOGLE_CLIENT_ID"),
+  client_secret: System.get_env("GOOGLE_CLIENT_SECRET"),
+  redirect_uri: "https://example.com/auth/google/callback"
+
+config :auth_kit, :github,
+  client_id: System.get_env("GITHUB_CLIENT_ID"),
+  client_secret: System.get_env("GITHUB_CLIENT_SECRET"),
+  redirect_uri: "https://example.com/auth/github/callback"
+```
+
+`:token_url` overrides the access-token URL for GitHub Enterprise Server.
+`:user_url` overrides the user profile URL for GitHub Enterprise Server.
+`:emails_url` overrides the email list URL for GitHub Enterprise Server.
+
+`AuthKit.Auth.sign_in_with_oauth(provider, profile, token_attrs \\ %{}, opts \\ [])`
+returns `{:ok, user}` or `{:error, reason}`.
+
+`:auto_signup` defaults to `false`. An identity for `{provider, identity}`
+returns that user and refreshes its tokens. Otherwise `:email_verified` must
+be `true`. Any other value returns `{:error, :email_not_verified}` and writes
+nothing. A verified email is looked up with `lower(email)` in the database.
+A match links the identity and confirms the email. With `:auto_signup` false
+and no match, the result is `{:error, :user_not_found}` and nothing is written.
+`auto_signup: true` creates the user, links the identity, and confirms the email.
+
+Google claims map as `identity: claims["sub"]`, `email: claims["email"]`,
+`email_verified: claims["email_verified"] in [true, "true"]`,
+`name: claims["name"]`, `avatar_url: claims["picture"]`.
+
+GitHub uses an address from `/user/emails` only when that address is both
+primary and verified.
 
 ## Email confirmation and passwords
 

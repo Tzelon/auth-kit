@@ -18,12 +18,13 @@ defmodule AuthKit.Fixtures do
     password = attrs[:password] || "password123"
     user = user_fixture(attrs)
 
-    Auth.link_identity(%{
-      user_id: user.id,
-      provider: "credential",
-      identity: user.id,
-      password: password
-    })
+    {:ok, _} =
+      Auth.link_identity(%{
+        user_id: user.id,
+        provider: "credential",
+        identity: user.id,
+        password: password
+      })
 
     {user, password}
   end
@@ -39,12 +40,13 @@ defmodule AuthKit.Fixtures do
     user = user_fixture(attrs)
     {:ok, user, _} = Auth.confirm_user_email(user)
 
-    Auth.link_identity(%{
-      user_id: user.id,
-      provider: "credential",
-      identity: user.id,
-      password: password
-    })
+    {:ok, _} =
+      Auth.link_identity(%{
+        user_id: user.id,
+        provider: "credential",
+        identity: user.id,
+        password: password
+      })
 
     {user, password}
   end

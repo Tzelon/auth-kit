@@ -14,6 +14,8 @@ defmodule AuthKit.OAuth.Google do
     * `:session_params` - Params stored by `authorize_url/1`, required by `callback/2`
   """
 
+  require Logger
+
   alias AuthKit.OAuth.{Error, HTTP}
 
   @authorize_url "https://accounts.google.com/o/oauth2/v2/auth"
@@ -101,16 +103,23 @@ defmodule AuthKit.OAuth.Google do
           {:ok, token}
 
         {:ok, status, body} ->
-          {:error,
-           Error.exception(
-             message: "Token request failed with status #{status}: #{inspect(body)}"
-           )}
+          log_token_failure(status, body)
+          {:error, Error.exception(message: "Token request failed with status #{status}")}
 
         {:error, error} ->
           {:error, error}
       end
     end
   end
+
+  defp log_token_failure(status, body) do
+    Logger.error(
+      "Google request failed status=#{status} error=#{token_field(body, "error")} error_description=#{token_field(body, "error_description")}"
+    )
+  end
+
+  defp token_field(body, key) when is_map(body), do: body[key]
+  defp token_field(_body, _key), do: nil
 
   # The ID token comes straight from Google's token endpoint over a verified
   # TLS connection, so per Google's docs the signature check can be skipped.

@@ -15,6 +15,7 @@ defmodule AuthKit.Test.Repo.Migrations.CreateAuthTables do
     end
 
     create(unique_index(:users, [:email]))
+    create(unique_index(:users, ["lower(email)"], name: :users_lower_email_index))
     create(unique_index(:users, [:phone_number]))
 
     create table(:identities, primary_key: false) do
@@ -36,6 +37,10 @@ defmodule AuthKit.Test.Repo.Migrations.CreateAuthTables do
     end
 
     create(index(:identities, [:user_id, :provider]))
+
+    create(
+      unique_index(:identities, [:provider, :identity], name: :identities_provider_identity_index)
+    )
 
     create table(:users_tokens, primary_key: false) do
       add(:id, :binary_id, primary_key: true)

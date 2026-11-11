@@ -91,13 +91,18 @@ defmodule AuthKit.Auth.SignUp do
 
     user = Auth.create_user(%{email: email, name: name, avatar_url: avatar_url})
 
-    _account =
-      Auth.link_identity(%{
-        user_id: user.id,
-        provider: "credential",
-        identity: user.id,
-        password: password
-      })
+    case Auth.link_identity(%{
+           user_id: user.id,
+           provider: "credential",
+           identity: user.id,
+           password: password
+         }) do
+      {:ok, _account} ->
+        :ok
+
+      {:error, changeset} ->
+        raise Ecto.InvalidChangesetError, action: :insert, changeset: changeset
+    end
 
     maybe_send_confirm_email(user, opts)
 
