@@ -4,6 +4,7 @@ defmodule AuthKit.OAuth.IDToken do
   alias AuthKit.OAuth.{Error, JWKS}
 
   @issuers ["https://accounts.google.com", "accounts.google.com"]
+  @skew_seconds 60
 
   def verify(jwt, jwks_url, audience, nonce) when is_binary(jwt) and is_binary(jwks_url) do
     with {:ok, header, signing_input, signature, claims} <- decode(jwt),
@@ -78,9 +79,14 @@ defmodule AuthKit.OAuth.IDToken do
   defp rsa_public_key(_jwk), do: :error
 
   defp check_claims(claims, audience, nonce) do
+    now = System.system_time(:second)
+
     with :ok <- check_claim(claims["iss"] in @issuers, "Invalid issuer"),
          :ok <- check_claim(claims["aud"] == audience, "Invalid audience"),
-         :ok <- check_claim(not expired?(claims["exp"]), "ID token has expired"),
+         :ok <- check_claim(not expired?(claims["exp"], now), "ID token has expired"),
+         :ok <- check_iat(claims["iat"], now),
+         :ok <- check_nbf(claims["nbf"], now),
+         :ok <- check_azp(claims["azp"], audience),
          :ok <- check_claim(claims["nonce"] == nonce, "Invalid nonce"),
          # Callers match accounts by email, so an unverified email must never get through.
          :ok <- check_claim(claims["email_verified"] in [true, "true"], "Email is not verified") do
@@ -88,8 +94,32 @@ defmodule AuthKit.OAuth.IDToken do
     end
   end
 
-  defp expired?(exp) when is_integer(exp), do: exp <= System.system_time(:second)
-  defp expired?(_exp), do: true
+  defp expired?(exp, now) when is_integer(exp), do: exp <= now
+  defp expired?(_exp, _now), do: true
+
+  defp check_iat(nil, _now), do: :ok
+
+  defp check_iat(iat, now) when is_integer(iat) and iat <= now + @skew_seconds, do: :ok
+
+  defp check_iat(_iat, _now) do
+    {:error, Error.exception(message: "ID token issued in the future")}
+  end
+
+  defp check_nbf(nil, _now), do: :ok
+
+  defp check_nbf(nbf, now) when is_integer(nbf) and nbf <= now + @skew_seconds, do: :ok
+
+  defp check_nbf(_nbf, _now) do
+    {:error, Error.exception(message: "ID token not yet valid")}
+  end
+
+  defp check_azp(nil, _client_id), do: :ok
+
+  defp check_azp(azp, client_id) when is_binary(azp) and azp == client_id, do: :ok
+
+  defp check_azp(_azp, _client_id) do
+    {:error, Error.exception(message: "Invalid authorized party")}
+  end
 
   defp check_claim(true, _message), do: :ok
   defp check_claim(false, message), do: {:error, Error.exception(message: message)}

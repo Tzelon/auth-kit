@@ -134,26 +134,44 @@ defmodule AuthKit.GoogleOAuthTest do
     assert {:ok, _} = IDToken.verify(jwt, url, "client", "nonce-1")
   end
 
-  test "refetches a fresh cache once when the kid is unknown", %{private: private, other: other} do
-    %{url: url, count: count, queue: queue} = serve([[jwk(other, "other")]])
-    assert {:ok, _} = AuthKit.OAuth.JWKS.key(url, "other")
-    assert Agent.get(count, & &1) == 1
-
-    Agent.update(queue, fn _ -> [[jwk(private, "kid-1")]] end)
-    jwt = sign(private, "kid-1", claims())
-
-    assert {:ok, _} = IDToken.verify(jwt, url, "client", "nonce-1")
-    assert Agent.get(count, & &1) == 2
-  end
-
-  test "stops after one refetch when the kid is still unknown", %{private: private, other: other} do
-    %{url: url, count: count} = serve([[jwk(other, "other")], [jwk(other, "other")]])
-    jwt = sign(private, "kid-1", claims())
+  test "two unknown-kid lookups in a row cause one fetch", %{other: other} do
+    %{url: url, count: count} = serve([[jwk(other, "other")]])
 
     assert {:error, %{message: "Unknown ID token signing key"}} =
-             IDToken.verify(jwt, url, "client", "nonce-1")
+             AuthKit.OAuth.JWKS.key(url, "kid-1")
 
-    assert Agent.get(count, & &1) == 2
+    assert {:error, %{message: "Unknown ID token signing key"}} =
+             AuthKit.OAuth.JWKS.key(url, "kid-1")
+
+    assert Agent.get(count, & &1) == 1
+  end
+
+  test "concurrent unknown-kid lookups share one fetch", %{other: other} do
+    {:ok, count} = Agent.start_link(fn -> 0 end)
+
+    stub =
+      OAuthHTTPStub.start(fn _request ->
+        Process.sleep(200)
+
+        Agent.update(count, &(&1 + 1))
+
+        OAuthHTTPStub.json(200, %{"keys" => [jwk(other, "other")]}, [
+          {"cache-control", "max-age=3600"}
+        ])
+      end)
+
+    on_exit(fn ->
+      OAuthHTTPStub.stop(stub)
+      if Process.alive?(count), do: Agent.stop(count)
+    end)
+
+    url = stub.base <> "/certs/" <> Integer.to_string(System.unique_integer([:positive]))
+    first = Task.async(fn -> AuthKit.OAuth.JWKS.key(url, "kid-1") end)
+    second = Task.async(fn -> AuthKit.OAuth.JWKS.key(url, "kid-1") end)
+
+    assert {:error, %{message: "Unknown ID token signing key"}} = Task.await(first, 10_000)
+    assert {:error, %{message: "Unknown ID token signing key"}} = Task.await(second, 10_000)
+    assert Agent.get(count, & &1) == 1
   end
 
   test "refetches when max-age is zero", %{private: private} do
@@ -220,6 +238,73 @@ defmodule AuthKit.GoogleOAuthTest do
       assert {:error, %{message: "Invalid ID token"}} =
                IDToken.verify(jwt, "http://127.0.0.1:1/certs", "client", "nonce-1")
     end
+  end
+
+  test "ignores a key whose use is enc and accepts a key that omits use", %{private: private} do
+    enc = Map.put(jwk(private, "kid-1"), "use", "enc")
+    %{url: enc_url, count: count} = serve([[enc]])
+    jwt = sign(private, "kid-1", claims())
+
+    assert {:error, %{message: "Unknown ID token signing key"}} =
+             IDToken.verify(jwt, enc_url, "client", "nonce-1")
+
+    assert {:error, %{message: "Unknown ID token signing key"}} =
+             IDToken.verify(jwt, enc_url, "client", "nonce-1")
+
+    assert Agent.get(count, & &1) == 1
+
+    omitted = Map.delete(jwk(private, "kid-1"), "use")
+    %{url: url} = serve([[omitted]])
+    assert {:ok, _} = IDToken.verify(sign(private, "kid-1", claims()), url, "client", "nonce-1")
+  end
+
+  test "rejects a future iat, an early nbf, and a mismatched azp", %{private: private} do
+    %{url: url} = serve([[jwk(private, "kid-1")]])
+    now = System.system_time(:second)
+
+    assert {:ok, _} =
+             IDToken.verify(
+               sign(
+                 private,
+                 "kid-1",
+                 claims(%{"iat" => now + 60, "nbf" => now + 60, "azp" => "client"})
+               ),
+               url,
+               "client",
+               "nonce-1"
+             )
+
+    assert {:error, %{message: "ID token issued in the future"}} =
+             IDToken.verify(
+               sign(private, "kid-1", claims(%{"iat" => now + 120})),
+               url,
+               "client",
+               "nonce-1"
+             )
+
+    assert {:error, %{message: "ID token issued in the future"}} =
+             IDToken.verify(
+               sign(private, "kid-1", claims(%{"iat" => "later"})),
+               url,
+               "client",
+               "nonce-1"
+             )
+
+    assert {:error, %{message: "ID token not yet valid"}} =
+             IDToken.verify(
+               sign(private, "kid-1", claims(%{"nbf" => now + 120})),
+               url,
+               "client",
+               "nonce-1"
+             )
+
+    assert {:error, %{message: "Invalid authorized party"}} =
+             IDToken.verify(
+               sign(private, "kid-1", claims(%{"azp" => "other-client"})),
+               url,
+               "client",
+               "nonce-1"
+             )
   end
 
   test "fails verification when the JWKS endpoint returns an error", %{private: private} do

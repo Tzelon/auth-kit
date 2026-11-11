@@ -7,16 +7,18 @@ defmodule AuthKit.OAuth.HTTP do
   Posts a form-encoded body and decodes the JSON response.
   """
   def post_form(url, body) do
-    request = {
-      String.to_charlist(url),
-      [{~c"accept", ~c"application/json"}],
-      ~c"application/x-www-form-urlencoded",
-      URI.encode_query(body)
-    }
+    with :ok <- ensure_https(url) do
+      request = {
+        String.to_charlist(url),
+        [{~c"accept", ~c"application/json"}],
+        ~c"application/x-www-form-urlencoded",
+        URI.encode_query(body)
+      }
 
-    case dispatch(:post, request, url) do
-      {:ok, status, _headers, decoded} -> {:ok, status, decoded}
-      {:error, error} -> {:error, error}
+      case dispatch(:post, request, url) do
+        {:ok, status, _headers, decoded} -> {:ok, status, decoded}
+        {:error, error} -> {:error, error}
+      end
     end
   end
 
@@ -27,21 +29,38 @@ defmodule AuthKit.OAuth.HTTP do
     end
   end
 
-  @doc """
-  GETs `url` and returns the status, response headers, and decoded body.
-  """
   def get_full(url, headers \\ []) when is_list(headers) do
-    header_list =
-      for {name, value} <- headers do
-        {String.to_charlist(name), String.to_charlist(to_string(value))}
-      end
+    with :ok <- ensure_https(url) do
+      header_list =
+        for {name, value} <- headers do
+          {String.to_charlist(name), String.to_charlist(to_string(value))}
+        end
 
-    request = {
-      String.to_charlist(url),
-      [{~c"accept", ~c"application/json"} | header_list]
-    }
+      request = {
+        String.to_charlist(url),
+        [{~c"accept", ~c"application/json"} | header_list]
+      }
 
-    dispatch(:get, request, url)
+      dispatch(:get, request, url)
+    end
+  end
+
+  defp ensure_https(url) when is_binary(url) do
+    case URI.parse(url) do
+      %URI{scheme: scheme} when is_binary(scheme) ->
+        if String.downcase(scheme) == "https" do
+          :ok
+        else
+          {:error, Error.exception(message: "Refusing non-HTTPS URL")}
+        end
+
+      _ ->
+        {:error, Error.exception(message: "Refusing non-HTTPS URL")}
+    end
+  end
+
+  defp ensure_https(_url) do
+    {:error, Error.exception(message: "Refusing non-HTTPS URL")}
   end
 
   defp dispatch(method, request, url) do
@@ -71,6 +90,7 @@ defmodule AuthKit.OAuth.HTTP do
     [
       timeout: 15_000,
       connect_timeout: 5_000,
+      autoredirect: false,
       ssl: [
         verify: :verify_peer,
         cacerts: :public_key.cacerts_get(),

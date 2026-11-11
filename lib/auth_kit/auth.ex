@@ -10,8 +10,6 @@ defmodule AuthKit.Auth do
   @lower_email_index :users_lower_email_index
 
   @doc """
-  Finds a user by email.
-
   The address is trimmed and downcased, then matched with `lower(email)`.
   """
   def fetch_user_by_email(email, opts \\ []) do
