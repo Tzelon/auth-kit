@@ -29,9 +29,8 @@ config :auth_kit,
   user: MyApp.User,
   identity: MyApp.Identity,
   user_token: MyApp.UserToken,
-  # %{version => base64 key}. Highest version encrypts. ak1 is version 1.
-  # Required in every environment that boots the application.
-  token_encryption_keys: %{1 => System.get_env("AUTH_KIT_TOKEN_ENCRYPTION_KEY")}
+  # 32 bytes, standard base64. Required in every environment that boots.
+  token_encryption_key: System.get_env("AUTH_KIT_TOKEN_ENCRYPTION_KEY")
 ```
 
 `:user` is read at compile time. After changing it, run
@@ -39,24 +38,13 @@ config :auth_kit,
 
 `access_token`, `refresh_token`, and `id_token` are encrypted with
 AES-256-GCM before they are written. A loaded identity struct still has
-the plaintext. The ciphertext is bound to the column name and prefixed
-with the key version (`ak1:` is version 1). A ciphertext copied into the
-same column of a different row still decrypts, because the binding is per
-column, not per row; that copy needs database write access and is weaker
-than reassigning the identity row itself. Those columns must be `text`.
-Back up the key: losing or changing it breaks sign-in for every user with
-an OAuth identity, including password users, because identities are
-preloaded. Generate a key with `openssl rand -base64 32`.
+the plaintext. Ciphertext is prefixed with `ak1:`. Those columns must be
+`text`. Back up the key: losing or changing it breaks sign-in for every
+user with an OAuth identity, including password users, because identities
+are preloaded. Generate a key with `openssl rand -base64 32`.
 
-`:allow_legacy_plaintext_tokens` defaults to `false`. An unprefixed token
-refuses to load. Set it to `true` only while re-saving existing rows
-(`force_change` each token), then turn it off.
-
-User emails are stored trimmed and lowercased with `String.trim/1` and
-`String.downcase/1` (Unicode default case mapping). Lookups compare that
-value to `lower(email)`. Postgres `lower()` follows the database collation
-and can disagree with Elixir for some characters. No backfill is performed.
-The `users_lower_email_index` index below is unchanged.
+User emails are stored trimmed and lowercased. Lookups compare that value
+to `lower(email)`. The `users_lower_email_index` index below is unchanged.
 
 A custom user schema needs these fields and association.
 `use AuthKit.UserSchema` fails the build if any are missing:
@@ -137,16 +125,13 @@ session map from `authorize_url/1` and pass it back to `callback/2`. It
 includes the code verifier and the time the state was issued. Encrypt the
 session cookie; the verifier is a secret, so signing the cookie is not
 enough. The callback deletes that session entry. A callback older than
-`:oauth_state_ttl` seconds (default 600), or a session from before that
-map included a verifier, fails with the same `401` as any other OAuth
-failure. Someone already in the middle of sign-in when this version is
-deployed gets that `401` once.
+`:oauth_state_ttl` seconds (default 600) fails with the same `401` as any
+other OAuth failure.
 
 Google ID tokens are checked, including the RS256 signature, against
 `https://www.googleapis.com/oauth2/v3/certs`. The host must be allowed to
-reach that URL. The certs are cached for `Cache-Control` max-age, capped
-at 24 hours. An unknown `kid` is fetched again only after 60 seconds from
-the last fetch of that URL.
+reach that URL. The certs are cached for `Cache-Control` max-age. An
+unknown `kid` is fetched once more.
 
 `AuthKit.Auth.sign_in_with_oauth(provider, profile, token_attrs \\ %{}, opts \\ [])`
 returns `{:ok, user}` or `{:error, reason}`.

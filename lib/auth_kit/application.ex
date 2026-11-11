@@ -6,10 +6,7 @@ defmodule AuthKit.Application do
   def start(_type, _args) do
     AuthKit.TokenEncryption.ensure_configured!()
 
-    children = [
-      {Task.Supervisor, name: AuthKit.OAuth.JWKS.TaskSupervisor},
-      AuthKit.OAuth.JWKS
-    ]
+    children = [AuthKit.OAuth.JWKS]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: AuthKit.Supervisor)
   end

@@ -29,7 +29,7 @@ defmodule AuthKit.OAuth.HTTP do
     end
   end
 
-  def get_full(url, headers \\ [], opts \\ []) when is_list(headers) and is_list(opts) do
+  def get_full(url, headers \\ []) when is_list(headers) do
     with :ok <- ensure_https(url) do
       header_list =
         for {name, value} <- headers do
@@ -41,7 +41,7 @@ defmodule AuthKit.OAuth.HTTP do
         [{~c"accept", ~c"application/json"} | header_list]
       }
 
-      dispatch(:get, request, url, opts)
+      dispatch(:get, request, url)
     end
   end
 
@@ -63,8 +63,8 @@ defmodule AuthKit.OAuth.HTTP do
     {:error, Error.exception(message: "Refusing non-HTTPS URL")}
   end
 
-  defp dispatch(method, request, url, opts \\ []) do
-    case :httpc.request(method, request, http_options(opts), body_format: :binary) do
+  defp dispatch(method, request, url) do
+    case :httpc.request(method, request, http_options(), body_format: :binary) do
       {:ok, {{_version, status, _reason}, headers, response}} ->
         decoded =
           case JSON.decode(response) do
@@ -86,10 +86,10 @@ defmodule AuthKit.OAuth.HTTP do
   end
 
   # :httpc does not verify server certificates unless told to.
-  defp http_options(opts) do
+  defp http_options do
     [
-      timeout: Keyword.get(opts, :timeout, 15_000),
-      connect_timeout: Keyword.get(opts, :connect_timeout, 5_000),
+      timeout: 15_000,
+      connect_timeout: 5_000,
       autoredirect: false,
       ssl: [
         verify: :verify_peer,
