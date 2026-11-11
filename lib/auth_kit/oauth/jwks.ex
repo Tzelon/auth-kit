@@ -5,8 +5,9 @@ defmodule AuthKit.OAuth.JWKS do
   One fetch serves a cache miss, including concurrent callers for the same
   URL, and does not block a hit for a different URL. `max-age` is capped at
   24 hours. A response with no `max-age`, or max-age 0, is stale on the next
-  read. An unknown `kid` is fetched again only after 60 seconds from the last
-  successful fetch of that URL. A failed fetch is reused for 8 seconds.
+  read. An unknown `kid` is fetched again only after 60 seconds from `fetched_at`.
+  A failed fetch is reused for 8 seconds when no fresh document is cached.
+  A failed refetch keeps that document and moves `fetched_at` forward.
   A lookup that times out returns an error.
   """
 
@@ -75,13 +76,15 @@ defmodule AuthKit.OAuth.JWKS do
     finish_fetch(ref, {:error, error}, state)
   end
 
+  def handle_info(_msg, state), do: {:noreply, state}
+
   defp fresh(%{expires_at: expires_at} = entry, now) when expires_at > now, do: entry
   defp fresh(_entry, _now), do: nil
 
   defp await_fetch(url, kid, from, state) do
     case state.inflight do
       %{^url => flight} ->
-        flight = %{flight | waiters: flight.waiters ++ [{from, kid}]}
+        flight = %{flight | waiters: [{from, kid} | flight.waiters]}
         {:noreply, %{state | inflight: Map.put(state.inflight, url, flight)}}
 
       _ ->
@@ -101,10 +104,11 @@ defmodule AuthKit.OAuth.JWKS do
     case Enum.find(state.inflight, fn {_url, flight} -> flight.ref == ref end) do
       {url, %{waiters: waiters}} ->
         Process.demonitor(ref, [:flush])
-        entry = entry_from(result, System.monotonic_time(:millisecond))
+        now = System.monotonic_time(:millisecond)
+        entry = remember(result, state.entries[url], now)
 
-        for {from, kid} <- waiters do
-          GenServer.reply(from, reply_for(entry, kid))
+        for {from, kid} <- Enum.reverse(waiters) do
+          GenServer.reply(from, reply_waiter(result, entry, kid))
         end
 
         {:noreply,
@@ -119,6 +123,15 @@ defmodule AuthKit.OAuth.JWKS do
     end
   end
 
+  defp remember({:error, error}, previous, now) do
+    case fresh(previous, now) do
+      %{status: :ok} = existing -> %{existing | fetched_at: now}
+      _ -> entry_from({:error, error}, now)
+    end
+  end
+
+  defp remember(result, _previous, now), do: entry_from(result, now)
+
   defp entry_from({:ok, keys, max_age}, now) do
     %{
       status: :ok,
@@ -131,6 +144,15 @@ defmodule AuthKit.OAuth.JWKS do
   defp entry_from({:error, error}, now) do
     %{status: :error, error: error, expires_at: now + @failure_ttl_ms}
   end
+
+  defp reply_waiter({:error, error}, %{status: :ok, keys: keys}, kid) do
+    case Map.get(keys, kid) do
+      nil -> {:error, error}
+      jwk -> {:ok, jwk}
+    end
+  end
+
+  defp reply_waiter(_result, entry, kid), do: reply_for(entry, kid)
 
   defp reply_for(%{status: :error, error: error}, _kid), do: {:error, error}
 
@@ -146,7 +168,7 @@ defmodule AuthKit.OAuth.JWKS do
   end
 
   defp fetch(url) do
-    case HTTP.get_full(url, [], timeout: @fetch_timeout_ms) do
+    case HTTP.get_full(url, [], timeout: @fetch_timeout_ms, connect_timeout: 3_000) do
       {:ok, 200, headers, %{"keys" => keys}} when is_list(keys) ->
         {:ok, index_keys(keys), max_age(headers)}
 

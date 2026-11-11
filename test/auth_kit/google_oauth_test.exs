@@ -201,6 +201,45 @@ defmodule AuthKit.GoogleOAuthTest do
     assert Agent.get(count, & &1) == 1
   end
 
+  @tag timeout: 120_000
+  test "a failed unknown-kid refetch keeps a fresh key", %{other: other} do
+    {:ok, count} = Agent.start_link(fn -> 0 end)
+    {:ok, mode} = Agent.start_link(fn -> :ok end)
+
+    stub =
+      OAuthHTTPStub.start(fn _request ->
+        Agent.update(count, &(&1 + 1))
+
+        case Agent.get(mode, & &1) do
+          :ok ->
+            OAuthHTTPStub.json(200, %{"keys" => [jwk(other, "kid-1")]}, [
+              {"cache-control", "max-age=3600"}
+            ])
+
+          :fail ->
+            OAuthHTTPStub.json(500, %{"error" => "unavailable"})
+        end
+      end)
+
+    on_exit(fn ->
+      OAuthHTTPStub.stop(stub)
+      if Process.alive?(count), do: Agent.stop(count)
+      if Process.alive?(mode), do: Agent.stop(mode)
+    end)
+
+    url = stub.base <> "/certs/" <> Integer.to_string(System.unique_integer([:positive]))
+    assert {:ok, %{"kid" => "kid-1"}} = AuthKit.OAuth.JWKS.key(url, "kid-1")
+
+    Agent.update(mode, fn _ -> :fail end)
+    Process.sleep(61_000)
+
+    assert {:error, %{message: "JWKS request failed with status 500"}} =
+             AuthKit.OAuth.JWKS.key(url, "missing")
+
+    assert {:ok, _} = AuthKit.OAuth.JWKS.key(url, "kid-1")
+    assert Agent.get(count, & &1) == 2
+  end
+
   test "an in-flight fetch does not block a hit for another url", %{other: other} do
     parent = self()
 
