@@ -13,6 +13,7 @@ defmodule AuthKit.GitHubOAuthTest do
 
   @state "state-1"
   @code "auth-code"
+  @verifier "pkce-verifier-1234567890-pkce-verifier-1234567890"
   @redirect_uri "http://localhost/auth/github/callback"
 
   test "sign_in_social redirects to GitHub", %{conn: conn} do
@@ -40,12 +41,16 @@ defmodule AuthKit.GitHubOAuthTest do
     query = URI.decode_query(uri.query)
     assert query["client_id"] == "client"
     assert query["prompt"] == "select_account"
+    assert query["code_challenge_method"] == "S256"
     assert query["scope"] |> String.split(" ") |> Enum.sort() == ["read:user", "user:email"]
-    assert get_session(conn, :session_params).state == query["state"]
+    session = get_session(conn, :session_params)
+    assert session.state == query["state"]
+    assert query["code_challenge"] == s256(session.code_verifier)
+    assert is_integer(session.issued_at)
   end
 
   test "authorization URL requests user:email" do
-    assert {:ok, %{url: url, session_params: %{state: state}}} =
+    assert {:ok, %{url: url, session_params: session}} =
              GitHub.authorize_url(
                client_id: "client",
                redirect_uri: @redirect_uri
@@ -59,7 +64,9 @@ defmodule AuthKit.GitHubOAuthTest do
     assert query["client_id"] == "client"
     assert query["redirect_uri"] == @redirect_uri
     assert query["response_type"] == "code"
-    assert query["state"] == state
+    assert query["state"] == session.state
+    assert query["code_challenge_method"] == "S256"
+    assert query["code_challenge"] == s256(session.code_verifier)
     assert query["scope"] |> String.split(" ") |> Enum.sort() == ["read:user", "user:email"]
   end
 
@@ -123,7 +130,8 @@ defmodule AuthKit.GitHubOAuthTest do
              "code" => @code,
              "client_id" => "client",
              "client_secret" => "secret",
-             "redirect_uri" => @redirect_uri
+             "redirect_uri" => @redirect_uri,
+             "code_verifier" => @verifier
            } = URI.decode_query(body)
 
     assert_received {:oauth_http, "GET", "/user", user_headers, ""}
@@ -131,6 +139,31 @@ defmodule AuthKit.GitHubOAuthTest do
     assert user_headers["user-agent"] == "auth-kit"
     assert_received {:oauth_http, "GET", "/user/emails", email_headers, ""}
     assert email_headers["authorization"] == "Bearer gho_test"
+    refute verifier_in_session?(conn, @verifier)
+  end
+
+  test "drops the pkce verifier from the session after the callback", %{conn: conn} do
+    stub =
+      stub(%{
+        {"POST", "/login/oauth/access_token"} => {200, %{"access_token" => "gho_test"}},
+        {"GET", "/user"} =>
+          {200, %{"id" => 42, "login" => "ada", "name" => "Ada", "avatar_url" => nil}},
+        {"GET", "/user/emails"} =>
+          {200, [%{"email" => "ada@example.com", "primary" => true, "verified" => true}]}
+      })
+
+    put_github_config(stub)
+
+    conn =
+      conn
+      |> callback_conn()
+      |> Auth2.callback(%{"provider" => "github", "code" => @code, "state" => @state},
+        auto_signup: true
+      )
+
+    assert redirected_to(conn) == "/"
+    assert get_session(conn, :session_params) == nil
+    refute verifier_in_session?(conn, @verifier)
   end
 
   test "refuses sign-in when no email is primary and verified", %{conn: conn} do
@@ -247,6 +280,44 @@ defmodule AuthKit.GitHubOAuthTest do
              )
   end
 
+  test "expired oauth state is the generic 401", %{conn: conn} do
+    previous = Application.get_env(:auth_kit, :oauth_state_ttl)
+    Application.put_env(:auth_kit, :oauth_state_ttl, 600)
+
+    on_exit(fn ->
+      if previous do
+        Application.put_env(:auth_kit, :oauth_state_ttl, previous)
+      else
+        Application.delete_env(:auth_kit, :oauth_state_ttl)
+      end
+    end)
+
+    put_github_config(stub(%{}))
+
+    log =
+      capture_log(fn ->
+        failed =
+          conn
+          |> put_session(:session_params, %{
+            state: @state,
+            code_verifier: @verifier,
+            issued_at: System.system_time(:second) - 600
+          })
+          |> Map.put(:query_string, "code=#{@code}&state=#{@state}")
+          |> Auth2.callback(%{"provider" => "github", "code" => @code, "state" => @state})
+
+        send(
+          self(),
+          {:failed, failed.status, failed.resp_body, verifier_in_session?(failed, @verifier)}
+        )
+      end)
+
+    assert_received {:failed, 401, "OAuth sign-in failed", false}
+    assert log =~ "OAuth state has expired"
+    refute_received {:oauth_http, _, _, _, _}
+    assert Repo.aggregate(User, :count) == 0
+  end
+
   test "rejects a callback with no state" do
     assert {:error, %AuthKit.OAuth.Error{message: "Invalid state param, possible CSRF attempt"}} =
              GitHub.callback(
@@ -300,7 +371,7 @@ defmodule AuthKit.GitHubOAuthTest do
 
     conn =
       conn
-      |> put_session(:session_params, %{state: @state})
+      |> put_session(:session_params, fresh_session())
       |> Map.put(:query_string, "code=#{@code}&state=#{@state}&provider=google")
       |> Auth2.callback(%{"provider" => "github", "code" => @code, "state" => @state},
         auto_signup: true
@@ -345,8 +416,22 @@ defmodule AuthKit.GitHubOAuthTest do
 
   defp callback_conn(conn) do
     conn
-    |> put_session(:session_params, %{state: @state})
+    |> put_session(:session_params, fresh_session())
     |> Map.put(:query_string, "code=#{@code}&state=#{@state}")
+  end
+
+  defp fresh_session do
+    %{state: @state, code_verifier: @verifier, issued_at: System.system_time(:second)}
+  end
+
+  defp s256(verifier) do
+    :crypto.hash(:sha256, verifier) |> Base.url_encode64(padding: false)
+  end
+
+  defp verifier_in_session?(conn, verifier) do
+    conn.private.plug_session
+    |> :erlang.term_to_binary()
+    |> String.contains?(verifier)
   end
 
   defp put_github_config(stub) do

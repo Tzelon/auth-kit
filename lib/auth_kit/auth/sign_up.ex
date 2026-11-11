@@ -82,7 +82,7 @@ defmodule AuthKit.Auth.SignUp do
     } =
       params
 
-    email = String.downcase(email)
+    email = AuthKit.Email.normalize(email)
 
     if Auth.fetch_user_by_email(email) do
       Logger.info("Sign-up attempt for existing email: #{email}")

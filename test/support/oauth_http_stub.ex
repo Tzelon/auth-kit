@@ -1,28 +1,59 @@
 defmodule AuthKit.Test.OAuthHTTPStub do
   @moduledoc false
 
+  def install_trust! do
+    dir = Path.expand("../../tmp/oauth_stub_tls", __DIR__)
+    File.mkdir_p!(dir)
+
+    paths = %{
+      dir: dir,
+      ca: Path.join(dir, "ca.pem"),
+      ca_key: Path.join(dir, "ca.key"),
+      cert: Path.join(dir, "server.pem"),
+      key: Path.join(dir, "server.key"),
+      csr: Path.join(dir, "server.csr")
+    }
+
+    if cert_stale?(paths) do
+      generate_certs!(paths)
+      :persistent_term.put(:auth_kit_test_ca_loaded, false)
+    end
+
+    unless :persistent_term.get(:auth_kit_test_ca_loaded, false) do
+      :ok = :public_key.cacerts_load(String.to_charlist(paths.ca))
+      :persistent_term.put(:auth_kit_test_ca_loaded, true)
+    end
+
+    paths
+  end
+
   def start(handler) when is_function(handler, 1) do
+    %{cert: cert, key: key} = install_trust!()
     parent = self()
     ref = make_ref()
 
     pid =
       spawn_link(fn ->
-        {:ok, listen} =
-          :gen_tcp.listen(0, [
-            :binary,
-            packet: :raw,
-            active: false,
-            reuseaddr: true,
-            ip: {127, 0, 0, 1}
-          ])
+        :ssl.start()
 
-        {:ok, port} = :inet.port(listen)
-        send(parent, {ref, port})
-        accept(listen, handler)
+        case :ssl.listen(0, listen_options(cert, key)) do
+          {:ok, listen} ->
+            {:ok, {_ip, port}} = :ssl.sockname(listen)
+            send(parent, {ref, {:ok, port}})
+            accept(listen, handler)
+
+          {:error, reason} ->
+            send(parent, {ref, {:error, reason}})
+        end
       end)
 
     receive do
-      {^ref, port} -> %{pid: pid, port: port, base: "http://127.0.0.1:#{port}"}
+      {^ref, {:ok, port}} ->
+        %{pid: pid, port: port, base: "https://127.0.0.1:#{port}"}
+
+      {^ref, {:error, reason}} ->
+        Process.exit(pid, :kill)
+        raise "oauth HTTP stub failed to listen: #{inspect(reason)}"
     after
       2_000 ->
         Process.exit(pid, :kill)
@@ -39,37 +70,62 @@ defmodule AuthKit.Test.OAuthHTTPStub do
     :ok
   end
 
-  def json(status, body) do
+  def json(status, body, headers \\ []) do
     payload = JSON.encode!(body)
+
+    header_lines =
+      Enum.map(headers, fn {key, value} ->
+        [to_string(key), ": ", to_string(value), "\r\n"]
+      end)
 
     [
       "HTTP/1.1 #{status} #{reason(status)}\r\n",
       "content-type: application/json\r\n",
       "content-length: #{byte_size(payload)}\r\n",
+      header_lines,
       "connection: close\r\n",
       "\r\n",
       payload
     ]
   end
 
+  defp listen_options(cert, key) do
+    [
+      :binary,
+      packet: :raw,
+      active: false,
+      reuseaddr: true,
+      ip: {127, 0, 0, 1},
+      certfile: String.to_charlist(cert),
+      keyfile: String.to_charlist(key)
+    ]
+  end
+
   defp accept(listen, handler) do
-    case :gen_tcp.accept(listen) do
+    case :ssl.transport_accept(listen, :infinity) do
       {:ok, socket} ->
-        spawn_link(fn -> serve(socket, handler) end)
-        accept(listen, handler)
+        case :ssl.handshake(socket, :infinity) do
+          {:ok, socket} ->
+            spawn_link(fn -> serve(socket, handler) end)
+            accept(listen, handler)
+
+          {:error, _reason} ->
+            :ssl.close(socket)
+            accept(listen, handler)
+        end
 
       {:error, :closed} ->
         :ok
 
       {:error, _reason} ->
-        :ok
+        accept(listen, handler)
     end
   end
 
   defp serve(socket, handler) do
     request = read_request(socket)
-    :gen_tcp.send(socket, handler.(request))
-    :gen_tcp.close(socket)
+    :ssl.send(socket, handler.(request))
+    :ssl.close(socket)
   end
 
   defp read_request(socket) do
@@ -93,7 +149,7 @@ defmodule AuthKit.Test.OAuthHTTPStub do
     if String.contains?(buffer, "\r\n\r\n") do
       {:ok, buffer}
     else
-      case :gen_tcp.recv(socket, 0, 5_000) do
+      case :ssl.recv(socket, 0, 5_000) do
         {:ok, data} -> read_headers(socket, buffer <> data)
         {:error, reason} -> {:error, reason}
       end
@@ -105,11 +161,86 @@ defmodule AuthKit.Test.OAuthHTTPStub do
   end
 
   defp read_body(socket, already, length) do
-    {:ok, data} = :gen_tcp.recv(socket, length - byte_size(already), 5_000)
+    {:ok, data} = :ssl.recv(socket, length - byte_size(already), 5_000)
     read_body(socket, already <> data, length)
   end
 
+  defp cert_stale?(paths) do
+    not (File.exists?(paths.cert) and File.exists?(paths.ca) and fresh_cert?(paths.cert) and
+           fresh_cert?(paths.ca))
+  end
+
+  defp fresh_cert?(path) do
+    case System.cmd("openssl", ["x509", "-in", path, "-noout", "-checkend", "86400"],
+           stderr_to_stdout: true
+         ) do
+      {_output, 0} -> true
+      _ -> false
+    end
+  end
+
+  defp generate_certs!(paths) do
+    openssl!([
+      "req",
+      "-x509",
+      "-newkey",
+      "rsa:2048",
+      "-keyout",
+      paths.ca_key,
+      "-out",
+      paths.ca,
+      "-days",
+      "3650",
+      "-nodes",
+      "-subj",
+      "/CN=auth-kit-test-ca",
+      "-addext",
+      "basicConstraints=critical,CA:TRUE"
+    ])
+
+    openssl!([
+      "req",
+      "-newkey",
+      "rsa:2048",
+      "-keyout",
+      paths.key,
+      "-out",
+      paths.csr,
+      "-nodes",
+      "-subj",
+      "/CN=127.0.0.1",
+      "-addext",
+      "subjectAltName=IP:127.0.0.1"
+    ])
+
+    openssl!([
+      "x509",
+      "-req",
+      "-in",
+      paths.csr,
+      "-CA",
+      paths.ca,
+      "-CAkey",
+      paths.ca_key,
+      "-CAcreateserial",
+      "-out",
+      paths.cert,
+      "-days",
+      "3650",
+      "-copy_extensions",
+      "copy"
+    ])
+  end
+
+  defp openssl!(args) do
+    case System.cmd("openssl", args, stderr_to_stdout: true) do
+      {_output, 0} -> :ok
+      {output, status} -> raise "openssl failed (#{status}): #{output}"
+    end
+  end
+
   defp reason(200), do: "OK"
+  defp reason(302), do: "Found"
   defp reason(400), do: "Bad Request"
   defp reason(401), do: "Unauthorized"
   defp reason(status), do: Integer.to_string(status)

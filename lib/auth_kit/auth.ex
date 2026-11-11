@@ -9,8 +9,17 @@ defmodule AuthKit.Auth do
   @identity AuthKit.Config.identity_schema()
   @lower_email_index :users_lower_email_index
 
+  @doc """
+  The address is trimmed and downcased, then matched with `lower(email)`.
+  """
   def fetch_user_by_email(email, opts \\ []) do
-    user = Repo.one(from u in AuthKit.Config.user_schema(), where: u.email == ^email)
+    email = AuthKit.Email.normalize(email)
+
+    user =
+      Repo.one(
+        from u in AuthKit.Config.user_schema(),
+          where: fragment("lower(?)", u.email) == ^email
+      )
 
     if preload = Keyword.get(opts, :preload) do
       user |> Repo.preload(preload)
@@ -384,7 +393,8 @@ defmodule AuthKit.Auth do
   `:auto_signup` defaults to `false`. An identity for `{provider, identity}`
   returns that user and refreshes its tokens. Otherwise `:email_verified` must
   be `true`. Any other value returns `{:error, :email_not_verified}` and writes
-  nothing. A verified email is looked up with `lower(email)` in the database.
+  nothing. A verified email is trimmed and downcased, then looked up with
+  `lower(email)` in the database.
   A match links the identity and confirms the email. With `:auto_signup` false
   and no match, returns `{:error, :user_not_found}` and writes nothing.
   `auto_signup: true` creates the user, links the identity, and confirms the
@@ -432,6 +442,7 @@ defmodule AuthKit.Auth do
 
   defp validate_email(changeset, opts) do
     changeset
+    |> update_change(:email, &AuthKit.Email.normalize/1)
     |> validate_required([:email])
     |> AuthKit.Auth.Params.validate_email_format()
     |> maybe_validate_unique_email(opts)
@@ -585,7 +596,7 @@ defmodule AuthKit.Auth do
   end
 
   defp find_or_insert_oauth_user(email, profile, opts) do
-    email = String.downcase(email)
+    email = AuthKit.Email.normalize(email)
 
     case Repo.one(from u in @user, where: fragment("lower(?)", u.email) == ^email) do
       %{} = user ->
@@ -683,7 +694,7 @@ defmodule AuthKit.Auth do
   defp oauth_email(profile) do
     case profile_value(profile, :email) do
       email when is_binary(email) ->
-        email = email |> String.trim() |> String.downcase()
+        email = AuthKit.Email.normalize(email)
         if email == "", do: {:error, :invalid_profile}, else: {:ok, email}
 
       _ ->

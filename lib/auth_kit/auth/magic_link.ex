@@ -58,7 +58,7 @@ defmodule AuthKit.Auth.MagicLink do
           throw({:error, HttpError.new(:bad_request, errors)})
       end
 
-    email = String.downcase(email)
+    email = AuthKit.Email.normalize(email)
 
     user =
       if user = Auth.fetch_user_by_email(email) do

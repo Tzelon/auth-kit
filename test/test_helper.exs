@@ -17,4 +17,6 @@ Ecto.Adapters.SQL.Sandbox.mode(AuthKit.Test.Repo, :auto)
 Ecto.Migrator.run(AuthKit.Test.Repo, "test/support/migrations", :up, all: true)
 Ecto.Adapters.SQL.Sandbox.mode(AuthKit.Test.Repo, :manual)
 
+AuthKit.Test.OAuthHTTPStub.install_trust!()
+
 ExUnit.start()

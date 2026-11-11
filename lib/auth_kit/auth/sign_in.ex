@@ -40,7 +40,7 @@ defmodule AuthKit.Auth.SignIn do
           throw({:error, HttpError.new(:bad_request, errors)})
       end
 
-    email = String.downcase(email)
+    email = AuthKit.Email.normalize(email)
     user = Auth.fetch_user_by_email(email, preload: [:identities])
 
     if user == nil do
@@ -89,7 +89,7 @@ defmodule AuthKit.Auth.SignIn do
           throw({:error, HttpError.new(:bad_request, errors)})
       end
 
-    if user = Auth.fetch_user_by_email(String.downcase(email)) do
+    if user = Auth.fetch_user_by_email(AuthKit.Email.normalize(email)) do
       token = Auth.generate_email_token(user, "reset_password")
       send_reset_password = Keyword.fetch!(opts, :send_reset_password)
       send_reset_password.(token)

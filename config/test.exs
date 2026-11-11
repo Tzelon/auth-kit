@@ -8,7 +8,8 @@ config :ecto_sqlite3, json_library: JSON
 # SQLite database used only by this library's tests. Host apps bring their own repo.
 config :auth_kit,
   ecto_repos: [AuthKit.Test.Repo],
-  repo: AuthKit.Test.Repo
+  repo: AuthKit.Test.Repo,
+  token_encryption_key: "JFW09y63mKSSrggag4otLvSxTn8xTS/H6e26aZbqypA="
 
 config :auth_kit, AuthKit.Test.Repo,
   database: Path.expand("../tmp/auth_kit_test.db", __DIR__),

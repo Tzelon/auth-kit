@@ -28,11 +28,23 @@ config :auth_kit,
   # Your schemas (required).
   user: MyApp.User,
   identity: MyApp.Identity,
-  user_token: MyApp.UserToken
+  user_token: MyApp.UserToken,
+  # 32 bytes, standard base64. Required in every environment that boots.
+  token_encryption_key: System.get_env("AUTH_KIT_TOKEN_ENCRYPTION_KEY")
 ```
 
 `:user` is read at compile time. After changing it, run
 `mix deps.compile auth_kit --force`.
+
+`access_token`, `refresh_token`, and `id_token` are encrypted with
+AES-256-GCM before they are written. A loaded identity struct still has
+the plaintext. Ciphertext is prefixed with `ak1:`. Those columns must be
+`text`. Back up the key: losing or changing it breaks sign-in for every
+user with an OAuth identity, including password users, because identities
+are preloaded. Generate a key with `openssl rand -base64 32`.
+
+User emails are stored trimmed and lowercased. Lookups compare that value
+to `lower(email)`. The `users_lower_email_index` index below is unchanged.
 
 A custom user schema needs these fields and association.
 `use AuthKit.UserSchema` fails the build if any are missing:
@@ -108,13 +120,27 @@ config :auth_kit, :github,
 `:user_url` overrides the user profile URL for GitHub Enterprise Server.
 `:emails_url` overrides the email list URL for GitHub Enterprise Server.
 
+Google and GitHub authorization requests use PKCE (S256). Store the whole
+session map from `authorize_url/1` and pass it back to `callback/2`. It
+includes the code verifier and the time the state was issued. Encrypt the
+session cookie; the verifier is a secret, so signing the cookie is not
+enough. The callback deletes that session entry. A callback older than
+`:oauth_state_ttl` seconds (default 600) fails with the same `401` as any
+other OAuth failure.
+
+Google ID tokens are checked, including the RS256 signature, against
+`https://www.googleapis.com/oauth2/v3/certs`. The host must be allowed to
+reach that URL. The certs are cached for `Cache-Control` max-age. An
+unknown `kid` is fetched once more.
+
 `AuthKit.Auth.sign_in_with_oauth(provider, profile, token_attrs \\ %{}, opts \\ [])`
 returns `{:ok, user}` or `{:error, reason}`.
 
 `:auto_signup` defaults to `false`. An identity for `{provider, identity}`
 returns that user and refreshes its tokens. Otherwise `:email_verified` must
 be `true`. Any other value returns `{:error, :email_not_verified}` and writes
-nothing. A verified email is looked up with `lower(email)` in the database.
+nothing. A verified email is trimmed and downcased, then looked up with
+`lower(email)` in the database.
 A match links the identity and confirms the email. With `:auto_signup` false
 and no match, the result is `{:error, :user_not_found}` and nothing is written.
 `auto_signup: true` creates the user, links the identity, and confirms the email.
