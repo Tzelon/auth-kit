@@ -40,7 +40,10 @@ config :auth_kit,
 `access_token`, `refresh_token`, and `id_token` are encrypted with
 AES-256-GCM before they are written. A loaded identity struct still has
 the plaintext. The ciphertext is bound to the column name and prefixed
-with the key version (`ak1:` is version 1). Those columns must be `text`.
+with the key version (`ak1:` is version 1). A ciphertext copied into the
+same column of a different row still decrypts, because the binding is per
+column, not per row; that copy needs database write access and is weaker
+than reassigning the identity row itself. Those columns must be `text`.
 Back up the key: losing or changing it breaks sign-in for every user with
 an OAuth identity, including password users, because identities are
 preloaded. Generate a key with `openssl rand -base64 32`.
