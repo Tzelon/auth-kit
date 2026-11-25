@@ -13,30 +13,18 @@ defmodule AuthKit.Auth.ConnHelpers do
   @remember_me_cookie "_auth_kit_web_user_remember_me"
   @remember_me_options [sign: true, max_age: @max_age, same_site: "Lax"]
 
-  # This function renews the session ID and erases the whole
-  # session to avoid fixation attacks. If there is any data
-  # in the session you may want to preserve after log in/log out,
-  # you must explicitly fetch the session data before clearing
-  # and then immediately set it after clearing, for example:
+  # Renews the session id and clears every key so a fixation attack
+  # cannot keep data from before sign-in or sign-out. Read anything that
+  # must survive before calling this, then write it back after.
   #
-  #     defp renew_session(conn) do
-  #       preferred_locale = get_session(conn, :preferred_locale)
-  #
-  #       conn
-  #       |> configure_session(renew: true)
-  #       |> clear_session()
-  #       |> put_session(:preferred_locale, preferred_locale)
-  #     end
-  #
+  # `:user_return_to` is not written back. The caller that redirects there
+  # reads it first.
   def renew_session(conn) do
     delete_csrf_token()
-
-    user_return_to = get_session(conn, :user_return_to)
 
     conn
     |> configure_session(renew: true)
     |> clear_session()
-    |> put_session(:user_return_to, user_return_to)
   end
 
   def ensure_user_token(conn) do

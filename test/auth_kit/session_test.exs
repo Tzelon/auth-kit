@@ -24,6 +24,7 @@ defmodule AuthKit.SessionTest do
       assert Auth.fetch_user_by_session_token(token).id == user.id
       assert redirected_to(conn) == "/hello"
       refute get_session(conn, :to_be_removed)
+      refute get_session(conn, :user_return_to)
     end
 
     test "writes a signed remember-me cookie", %{conn: conn} do
