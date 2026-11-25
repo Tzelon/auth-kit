@@ -155,7 +155,11 @@ AuthKit.Tenants.invite(tenant, inviter, %{
 
 Accept, reject, and fetch-by-token require a signed-in user whose email matches the invitation, with `email_confirmed_at` set. The invitation is still `pending` and `expires_at` is in the future. Accepting inserts a member with the invitation's role and marks the invitation `accepted`.
 
-Inviting an email that has no user yet is allowed. That person accepts after they sign up and confirm their email.
+`accept_invitation/3` takes `confirm_email: true`. A pending, unexpired invitation for the same email, compared case-insensitively, then sets `email_confirmed_at` in that transaction when it is still empty. The password and the current session stay. Send the raw token only in the invitation email. Anyone who can read the token can confirm that address.
+
+Better Auth's organization plugin accepts an invitation when the caller passes the invitation id and the signed-in email matches. Accepting never sets `emailVerified`. `requireEmailVerificationOnInvitation` requires a verified email, which its docs recommend when the invite link can be seen outside the invitee's inbox.
+
+Inviting an email that has no user yet is allowed. That person accepts after they sign up and confirm their email, or on accept when the host passes `confirm_email: true`.
 
 Inviting a current member returns `{:error, :already_member}`. Inviting an address that already has a pending invitation returns `{:error, :already_invited}` unless `resend: true`, which rotates the token and the expiry and calls `send_invitation` again. `cancel_pending_on_reinvite: true` marks the previous pending rows `canceled` before inserting the new one.
 
@@ -176,7 +180,7 @@ All of these take the acting user, and a tenant id or the session token when the
 | `delete_tenant/2` | `POST /organization/delete` | Owner only. Deletes members and invitations |
 | `set_active_tenant/2` | `POST /organization/set-active` | Id or slug, or `nil` to clear |
 | `invite/3` | `POST /organization/invite-member` | Needs `invitation: :create` |
-| `accept_invitation/2` | `POST /organization/accept-invitation` | By raw token |
+| `accept_invitation/2` | `POST /organization/accept-invitation` | By raw token. `confirm_email: true` on `/3` confirms a matching email |
 | `reject_invitation/2` | `POST /organization/reject-invitation` | By raw token |
 | `cancel_invitation/3` | `POST /organization/cancel-invitation` | Needs `invitation: :cancel` |
 | `get_invitation/2` | `GET /organization/get-invitation` | By raw token, invited user only |
@@ -206,6 +210,7 @@ Passed per call, with defaults the host can set under `config :auth_kit, tenant_
 | `:invitation_limit` | `100` | Pending invitations in that tenant |
 | `:cancel_pending_on_reinvite` | `false` | |
 | `:send_invitation` | required on `invite/3` | `fn invitation, raw_token -> any end` |
+| `:confirm_email` | `false` | On accept, a matching pending invite sets `email_confirmed_at` and keeps the password and session. The raw token must only be sent in the invitation email |
 | `:changeset` | none | `fn changeset, attrs -> changeset end` for host columns |
 
 A `before_*` hook returns `:ok` or `{:ok, attrs}` to continue, or `{:error, reason}` to stop the write. `after_*` hooks run after the transaction commits.

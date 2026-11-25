@@ -187,6 +187,63 @@ defmodule AuthKit.TenantsTest do
     assert {:error, :email_mismatch} = Tenants.accept_invitation(other, token)
   end
 
+  test "confirm_email on a matching invite confirms the user and keeps the password" do
+    owner = confirmed_user()
+    {:ok, %{tenant: tenant}} = Tenants.create_tenant(owner, %{name: "Acme", slug: "acme"})
+
+    Tenants.invite(tenant, owner, %{
+      email: "ada@example.com",
+      role: ["member"],
+      send_invitation: fn _invitation, token -> send(self(), {:token, token}) end
+    })
+
+    assert_received {:token, token}
+    {guest, password} = AuthKit.Fixtures.user_with_password_fixture(%{email: "ada@example.com"})
+    session = Auth.generate_session_token(guest)
+    password_hash = Auth.get_user_identity_by_provider(guest, "credential").password
+
+    assert {:ok, %{member: member}} =
+             Tenants.accept_invitation(guest, token, confirm_email: true)
+
+    assert member.role == ["member"]
+    assert member.user_id == guest.id
+    guest = Repo.get!(AuthKit.Test.User, guest.id)
+    assert guest.email_confirmed_at
+    identity = Auth.get_user_identity_by_provider(guest, "credential")
+    assert identity.password == password_hash
+    assert Auth.valid_password?(identity, password)
+    assert Repo.get_by!(UserToken, token: session, context: "session")
+  end
+
+  test "accept without confirm_email, or for a different email, leaves the user unchanged" do
+    owner = confirmed_user()
+    {:ok, %{tenant: tenant}} = Tenants.create_tenant(owner, %{name: "Acme", slug: "acme"})
+
+    Tenants.invite(tenant, owner, %{
+      email: "ada@example.com",
+      role: ["member"],
+      send_invitation: fn _invitation, token -> send(self(), {:token, token}) end
+    })
+
+    assert_received {:token, token}
+    {guest, password} = AuthKit.Fixtures.user_with_password_fixture(%{email: "ada@example.com"})
+
+    assert {:error, :email_not_confirmed} = Tenants.accept_invitation(guest, token)
+    refute Repo.get!(AuthKit.Test.User, guest.id).email_confirmed_at
+    assert Auth.valid_password?(Auth.get_user_identity_by_provider(guest, "credential"), password)
+    refute Repo.get_by(AuthKit.Test.TenantMember, tenant_id: tenant.id, user_id: guest.id)
+
+    other = user_with_email("bea@example.com")
+
+    assert {:error, :email_mismatch} =
+             Tenants.accept_invitation(other, token, confirm_email: true)
+
+    refute Repo.get!(AuthKit.Test.User, other.id).email_confirmed_at
+    refute Repo.get!(AuthKit.Test.User, guest.id).email_confirmed_at
+    refute Repo.get_by(AuthKit.Test.TenantMember, tenant_id: tenant.id, user_id: other.id)
+    assert Repo.get_by!(TenantInvitation, email: "ada@example.com").status == :pending
+  end
+
   test "reinvite can cancel the previous pending invitation" do
     owner = confirmed_user()
     {:ok, %{tenant: tenant}} = Tenants.create_tenant(owner, %{name: "Acme", slug: "acme"})

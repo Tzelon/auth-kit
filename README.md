@@ -171,6 +171,8 @@ attempt counter.
 
 A tenant is a workspace a user belongs to. Sign-in stays global. Configure `tenant`, `tenant_member`, and `tenant_invitation`, and add `auth_kit_active_tenant_field/0` to the user token schema when sessions should remember a tenant. The host sends invitation email through the `:send_invitation` callback. See `AuthKit.Tenants` and `docs/tenants.md`.
 
+`Tenants.accept_invitation/3` accepts `confirm_email: true`. A matching, pending, unexpired invite then sets `email_confirmed_at` in the same transaction and leaves the password and session in place. The raw token must only be sent in the invitation email. Better Auth's organization plugin accepts by invitation id when the signed-in email matches, never sets `emailVerified`, and uses `requireEmailVerificationOnInvitation` when that link can be seen outside the inbox.
+
 ## Bearer sessions
 
 Session tokens are raw bytes. `AuthKit.UserToken.encode_session_token/1`
