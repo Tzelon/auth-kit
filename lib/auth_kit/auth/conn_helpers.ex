@@ -18,8 +18,7 @@ defmodule AuthKit.Auth.ConnHelpers do
   # must survive before calling this, then write it back after.
   #
   # `:user_return_to` is not written back. The caller that redirects there
-  # reads it first. Copying it forward made a later sign-in reuse a path
-  # from an earlier visit, including after sign-out.
+  # reads it first.
   def renew_session(conn) do
     delete_csrf_token()
 

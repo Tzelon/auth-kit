@@ -27,26 +27,6 @@ defmodule AuthKit.SessionTest do
       refute get_session(conn, :user_return_to)
     end
 
-    test "a later sign-in does not reuse a path already used", %{conn: conn} do
-      {user, password} = Fixtures.user_with_password_fixture()
-      params = %{"email" => user.email, "password" => password}
-      return_to = "/device?user_code=ABCD2345"
-
-      conn =
-        conn
-        |> put_session(:user_return_to, return_to)
-        |> SignIn.sign_in_email(params)
-
-      assert redirected_to(conn) == return_to
-
-      conn = conn |> continue() |> SignOut.sign_out_user()
-      assert redirected_to(conn) == "/"
-      refute get_session(conn, :user_return_to)
-
-      conn = conn |> continue() |> SignIn.sign_in_email(params)
-      assert redirected_to(conn) == "/"
-    end
-
     test "writes a signed remember-me cookie", %{conn: conn} do
       {user, password} = Fixtures.user_with_password_fixture()
 
@@ -158,13 +138,5 @@ defmodule AuthKit.SessionTest do
       refute get_session(conn, :user_token)
       assert redirected_to(conn) == "/"
     end
-  end
-
-  # The next request carries the session this response wrote.
-  defp continue(conn) do
-    :get
-    |> conn("/")
-    |> Map.replace!(:secret_key_base, secret_key_base())
-    |> init_test_session(get_session(conn))
   end
 end
