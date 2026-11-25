@@ -233,7 +233,11 @@ defmodule AuthKit.Tenants do
   @doc """
   Accepts an invitation token for the signed-in user.
 
-  The user's email must match the invitation and `email_confirmed_at` must be set.
+  The user's email must match the invitation. `email_confirmed_at` must
+  be set unless `confirm_email: true` (default `false`). That option
+  sets `email_confirmed_at` in the accept transaction when it is still
+  empty, and leaves the password and session in place. Send the raw
+  token only in the invitation email.
   """
   def accept_invitation(user, raw_token) when is_binary(raw_token) do
     accept_invitation(user, raw_token, [])
@@ -241,8 +245,9 @@ defmodule AuthKit.Tenants do
 
   def accept_invitation(user, raw_token, opts) when is_binary(raw_token) and is_list(opts) do
     ensure!()
+    opts = Keyword.put(opts, :confirm_email, opt(opts, :confirm_email, false) == true)
 
-    with {:ok, invitation} <- invitation_for_user(user, raw_token),
+    with {:ok, invitation} <- invitation_for_user(user, raw_token, opts),
          {:ok, tenant} <- fetch_tenant_by_id(invitation.tenant_id),
          :ok <- under_membership_limit(tenant, user, opts),
          :ok <-
@@ -251,7 +256,8 @@ defmodule AuthKit.Tenants do
              user: user,
              tenant: tenant
            }),
-         {:ok, %{invitation: invitation, member: member}} <- accept_rows(invitation, user, tenant) do
+         {:ok, %{invitation: invitation, member: member}} <-
+           accept_rows(invitation, user, tenant, opts) do
       after_hook(opts, :after_accept_invitation, %{
         invitation: invitation,
         member: member,
@@ -264,7 +270,7 @@ defmodule AuthKit.Tenants do
   end
 
   @doc """
-  Rejects an invitation token. Same email and confirmation checks as accept.
+  Rejects an invitation token. The user's email must match, and `email_confirmed_at` must be set.
   """
   def reject_invitation(user, raw_token) when is_binary(raw_token) do
     reject_invitation(user, raw_token, [])
@@ -783,7 +789,7 @@ defmodule AuthKit.Tenants do
     end
   end
 
-  defp accept_rows(invitation, user, tenant) do
+  defp accept_rows(invitation, user, tenant, opts) do
     member_cs =
       member_schema()
       |> struct()
@@ -793,6 +799,7 @@ defmodule AuthKit.Tenants do
 
     result =
       Multi.new()
+      |> maybe_confirm_email(user, opts)
       |> Multi.update(:invitation, change(invitation, status: :accepted))
       |> Multi.insert(:member, member_cs)
       |> Repo.transaction()
@@ -804,12 +811,30 @@ defmodule AuthKit.Tenants do
     end
   end
 
-  defp invitation_for_user(user, raw_token) do
+  # Don't call Auth.confirm_user_email/1: that deletes a password set before confirmation.
+  defp maybe_confirm_email(multi, %{id: id, email_confirmed_at: nil}, opts) do
+    if opts[:confirm_email] == true do
+      now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+      Multi.run(multi, :user, fn repo, _changes ->
+        user_schema()
+        |> repo.get!(id)
+        |> change(email_confirmed_at: now)
+        |> repo.update()
+      end)
+    else
+      multi
+    end
+  end
+
+  defp maybe_confirm_email(multi, _user, _opts), do: multi
+
+  defp invitation_for_user(user, raw_token, opts \\ []) do
     with {:ok, invitation} <- fetch_invitation_token(raw_token),
          :ok <- pending_only(invitation),
          :ok <- unexpired(invitation),
          :ok <- email_matches(user, invitation),
-         :ok <- email_confirmed(user) do
+         :ok <- email_confirmed(user, opts) do
       if Repo.get_by(member_schema(), tenant_id: invitation.tenant_id, user_id: user.id) do
         {:error, :already_member}
       else
@@ -1126,8 +1151,11 @@ defmodule AuthKit.Tenants do
     end
   end
 
-  defp email_confirmed(%{email_confirmed_at: nil}), do: {:error, :email_not_confirmed}
-  defp email_confirmed(_user), do: :ok
+  defp email_confirmed(%{email_confirmed_at: nil}, opts) do
+    if opts[:confirm_email] == true, do: :ok, else: {:error, :email_not_confirmed}
+  end
+
+  defp email_confirmed(_user, _opts), do: :ok
 
   defp allow_create(user, opts) do
     allowed =
