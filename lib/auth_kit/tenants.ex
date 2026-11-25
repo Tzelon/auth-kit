@@ -233,15 +233,11 @@ defmodule AuthKit.Tenants do
   @doc """
   Accepts an invitation token for the signed-in user.
 
-  The user's email must match the invitation and `email_confirmed_at` must
-  be set. `confirm_email: true` confirms a pending, unexpired invitation
-  for that same email in the accept transaction, and leaves the password
-  and session in place. Send the raw token only in the invitation email.
-
-  Better Auth's organization plugin accepts by invitation id when the
-  signed-in email matches. It never sets `emailVerified`.
-  `requireEmailVerificationOnInvitation` requires a verified email when
-  the invite link can be seen outside the invitee's inbox.
+  The user's email must match the invitation. `email_confirmed_at` must
+  be set unless `confirm_email: true` (default `false`). That option
+  sets `email_confirmed_at` in the accept transaction when it is still
+  empty, and leaves the password and session in place. Send the raw
+  token only in the invitation email.
   """
   def accept_invitation(user, raw_token) when is_binary(raw_token) do
     accept_invitation(user, raw_token, [])
@@ -274,7 +270,7 @@ defmodule AuthKit.Tenants do
   end
 
   @doc """
-  Rejects an invitation token. Same email and confirmation checks as accept.
+  Rejects an invitation token. The user's email must match, and `email_confirmed_at` must be set.
   """
   def reject_invitation(user, raw_token) when is_binary(raw_token) do
     reject_invitation(user, raw_token, [])
@@ -815,7 +811,7 @@ defmodule AuthKit.Tenants do
     end
   end
 
-  # Sets email_confirmed_at only. The password and session stay.
+  # Don't call Auth.confirm_user_email/1: that deletes a password set before confirmation.
   defp maybe_confirm_email(multi, %{id: id, email_confirmed_at: nil}, opts) do
     if opts[:confirm_email] == true do
       now = DateTime.utc_now() |> DateTime.truncate(:second)
