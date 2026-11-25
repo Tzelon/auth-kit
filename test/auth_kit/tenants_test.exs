@@ -193,7 +193,7 @@ defmodule AuthKit.TenantsTest do
 
     Tenants.invite(tenant, owner, %{
       email: "ada@example.com",
-      role: ["member"],
+      role: ["admin"],
       send_invitation: fn _invitation, token -> send(self(), {:token, token}) end
     })
 
@@ -205,7 +205,7 @@ defmodule AuthKit.TenantsTest do
     assert {:ok, %{member: member}} =
              Tenants.accept_invitation(guest, token, confirm_email: true)
 
-    assert member.role == ["member"]
+    assert member.role == ["admin"]
     assert member.user_id == guest.id
     guest = Repo.get!(AuthKit.Test.User, guest.id)
     assert guest.email_confirmed_at
