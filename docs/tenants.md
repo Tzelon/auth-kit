@@ -157,8 +157,6 @@ Accept, reject, and fetch-by-token require a signed-in user whose email matches 
 
 `accept_invitation/3` takes `confirm_email: true` (default `false`, also settable in `tenant_options`). A pending, unexpired invitation whose email matches the signed-in user, compared case-insensitively, then sets `email_confirmed_at` in that transaction when it is still empty. The password and the current session stay. This does not call `Auth.confirm_user_email/1`, which would delete a password set before confirmation. Send the raw token only in the invitation email. Anyone who has the token and a session for that email can confirm the address.
 
-Better Auth accepts by invitation id when the signed-in email matches, and does not set `emailVerified` on accept. A verified email is required when invitation ids are predictable, or when `requireEmailVerificationOnInvitation` is true. Its docs recommend that option when invitation ids may be visible outside the invitee's inbox, when members can list invitations, or when unverified sessions are allowed.
-
 Inviting an email that has no user yet is allowed. That person accepts after they sign up and confirm their email, or on accept when the host passes `confirm_email: true`.
 
 Inviting a current member returns `{:error, :already_member}`. Inviting an address that already has a pending invitation returns `{:error, :already_invited}` unless `resend: true`, which rotates the token and the expiry and calls `send_invitation` again. `cancel_pending_on_reinvite: true` marks the previous pending rows `canceled` before inserting the new one.
